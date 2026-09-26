@@ -113,3 +113,23 @@ def decorated(impl):
         A TypeDecorator instance whose implementation is ``impl``.
     """
     return type("Decorated", (types.TypeDecorator,), {"impl": impl, "cache_ok": True})()
+
+
+def wait_for_spark_session_state(client, session_id, state, timeout=120):
+    """Wait until a Spark session reaches a state.
+
+    Args:
+        client: The Athena client.
+        session_id: The session ID.
+        state: The session state to wait for.
+        timeout: Seconds to wait.
+
+    Raises:
+        AssertionError: If the session does not reach the state in time.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if client.get_session_status(SessionId=session_id)["Status"]["State"] == state:
+            return
+        time.sleep(1)
+    raise AssertionError(f"Session {session_id} did not become {state} in {timeout} seconds.")
