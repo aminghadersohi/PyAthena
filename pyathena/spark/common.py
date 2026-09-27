@@ -62,9 +62,13 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
         engine_configuration: dict[str, Any] | None = None,
         notebook_version: str | None = None,
         session_idle_timeout_minutes: int | None = None,
+        terminate_session_on_close: bool | None = None,
         **kwargs,
     ) -> None:
         """Initialize the cursor and start or attach to a Spark session.
+
+        If waiting for a newly started session fails, that session is terminated
+        regardless of ``terminate_session_on_close``; a supplied session is not.
 
         Args:
             session_id: ID of an existing session to use. If omitted, a new
@@ -74,6 +78,9 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
                 Defaults to ``get_default_engine_configuration()``.
             notebook_version: Notebook version of a new session.
             session_idle_timeout_minutes: Idle timeout of a new session in minutes.
+            terminate_session_on_close: Whether ``close()`` terminates the session.
+                If None, only a session started by this cursor is terminated;
+                a session supplied with ``session_id`` is left running.
             **kwargs: Arguments passed to ``BaseCursor``.
 
         Raises:
@@ -89,6 +96,10 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
         self._notebook_version = notebook_version
         self._session_description = description
         self._session_idle_timeout_minutes = session_idle_timeout_minutes
+        if terminate_session_on_close is None:
+            # Only a session started by this cursor.
+            terminate_session_on_close = not session_id
+        self._terminate_session_on_close = terminate_session_on_close
         self._calculation_id: str | None = None
         self._calculation_execution: AthenaCalculationExecution | None = None
 
@@ -359,7 +370,19 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
             raise OperationalError(*e.args) from e
 
     def close(self) -> None:
-        self._terminate_session()
+        """Close the cursor, terminating its Spark session if configured to.
+
+        See ``terminate_session_on_close``. After a successful termination,
+        further calls do not terminate the session again; after a failed one,
+        calling this method again retries it.
+
+        Raises:
+            OperationalError: If terminating the session fails.
+        """
+        if self._terminate_session_on_close:
+            self._terminate_session()
+            # Terminated; later calls do nothing.
+            self._terminate_session_on_close = False
 
     def executemany(
         self,
