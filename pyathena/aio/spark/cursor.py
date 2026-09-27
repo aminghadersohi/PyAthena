@@ -320,9 +320,10 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
         Raises:
             OperationalError: If terminating the session fails.
         """
-        if self._should_terminate_session():
+        if self._terminate_session_on_close:
             await self._terminate_session()
-            self._session_terminated = True
+            # Terminated; later calls do nothing.
+            self._terminate_session_on_close = False
 
     async def executemany(  # type: ignore[override]
         self,

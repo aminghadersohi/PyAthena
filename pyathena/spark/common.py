@@ -96,8 +96,10 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
         self._notebook_version = notebook_version
         self._session_description = description
         self._session_idle_timeout_minutes = session_idle_timeout_minutes
+        if terminate_session_on_close is None:
+            # Only a session started by this cursor.
+            terminate_session_on_close = not session_id
         self._terminate_session_on_close = terminate_session_on_close
-        self._session_terminated = False
         self._calculation_id: str | None = None
         self._calculation_execution: AthenaCalculationExecution | None = None
 
@@ -113,12 +115,10 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
         if session_id:
             if self._exists_session(session_id):
                 self._session_id = session_id
-                self._owns_session = False
             else:
                 raise OperationalError(f"Session: {session_id} not found.")
         else:
             self._session_id = self._start_session()
-            self._owns_session = True
 
     @property
     def session_id(self) -> str:
@@ -369,20 +369,6 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
             _logger.exception("Failed to cancel calculation.")
             raise OperationalError(*e.args) from e
 
-    def _should_terminate_session(self) -> bool:
-        """Whether ``close()`` terminates the cursor's Spark session.
-
-        Returns:
-            False if the session has already been terminated by ``close()``;
-            otherwise ``terminate_session_on_close``, or whether this cursor
-            started the session if that is None.
-        """
-        if self._session_terminated:
-            return False
-        if self._terminate_session_on_close is None:
-            return self._owns_session
-        return self._terminate_session_on_close
-
     def close(self) -> None:
         """Close the cursor, terminating its Spark session if configured to.
 
@@ -393,9 +379,10 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
         Raises:
             OperationalError: If terminating the session fails.
         """
-        if self._should_terminate_session():
+        if self._terminate_session_on_close:
             self._terminate_session()
-            self._session_terminated = True
+            # Terminated; later calls do nothing.
+            self._terminate_session_on_close = False
 
     def executemany(
         self,

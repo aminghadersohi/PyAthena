@@ -33,9 +33,7 @@ def _owned_session_cursor() -> AsyncSparkCursor:
         The cursor, whose ``close()`` terminates the session.
     """
     cursor = AsyncSparkCursor.__new__(AsyncSparkCursor)  # bypass __init__ to avoid AWS calls
-    cursor._owns_session = True
-    cursor._terminate_session_on_close = None
-    cursor._session_terminated = False
+    cursor._terminate_session_on_close = True
     return cursor
 
 
