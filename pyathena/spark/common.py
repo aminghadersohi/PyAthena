@@ -378,12 +378,12 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
         of starting another one.
 
         With ``kill_on_interrupt`` enabled, the request runs on a helper thread.
-        A ``KeyboardInterrupt`` before the helper sends the request propagates, and
-        the request is not sent. A later one waits for the request to finish,
-        requests cancellation of the calculation it started, waits for a terminal
-        state, stores the calculation ID and execution on the cursor, and re-raises
-        the interrupt. Another ``KeyboardInterrupt`` during that wait propagates at
-        once.
+        A ``KeyboardInterrupt`` before the helper begins the request propagates,
+        and the helper does not send it. Once the helper has begun, an interrupt
+        waits for the request to finish, requests cancellation of the calculation
+        it started, waits for a terminal state, stores the calculation ID and
+        execution on the cursor, and re-raises the interrupt. Another
+        ``KeyboardInterrupt`` during that wait propagates at once.
 
         Args:
             session_id: The session ID.
@@ -412,7 +412,7 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
         future: Future[str] = Future()
 
         def start() -> None:
-            # Send nothing if the interrupt already gave up on this request.
+            # Begin the request only if no interrupt has given up on it yet.
             if not future.set_running_or_notify_cancel():
                 return
             try:
@@ -425,7 +425,7 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
             return self.__wait_for_start(future)
         except KeyboardInterrupt as interrupt:
             if future.cancel():
-                # The request has not been sent and never will be.
+                # The helper has not begun the request and never will.
                 raise
             _logger.warning("Query canceled by user.")
             try:
