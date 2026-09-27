@@ -75,6 +75,7 @@ _docs-help:
 _docs-build:
     uv run sphinx-multiversion docs docs/_build/html
     echo '<meta http-equiv="refresh" content="0; url=./master/index.html">' > docs/_build/html/index.html
+    cp docs/_root/404.html docs/_build/html/404.html
     echo 'pyathena.dev' > docs/_build/html/CNAME
     touch docs/_build/html/.nojekyll
 

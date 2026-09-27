@@ -1,0 +1,30 @@
+<!--
+Copyright 2026 The PyAthena authors
+
+Licensed under the MIT License.
+See LICENSE or https://opensource.org/licenses/MIT.
+
+SPDX-License-Identifier: MIT
+-->
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Page not found - PyAthena</title>
+    <script>
+      // Versions that are no longer built redirect to the same page on master.
+      (function () {
+        var match = window.location.pathname.match(/^\/v\d+\.\d+\.\d+(\/.*)?$/);
+        if (match) {
+          window.location.replace(
+            "/master" + (match[1] || "/") + window.location.search + window.location.hash
+          );
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <h1>Page not found</h1>
+    <p>See the <a href="/master/index.html">latest PyAthena documentation</a>.</p>
+  </body>
+</html>

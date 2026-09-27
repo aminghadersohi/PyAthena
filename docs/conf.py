@@ -2,6 +2,7 @@
 #
 # For the full list of built-in configuration values, see the documentation:
 # https://www.sphinx-doc.org/en/master/usage/configuration.html
+import re
 import subprocess
 from datetime import datetime, timezone
 
@@ -214,8 +215,55 @@ ogp_type = "website"
 
 # -- Sphinx-multiversion configuration ----------------------------------------
 
-# Whitelist pattern for tags (semantic versioning: vX.Y.Z)
-smv_tag_whitelist = r"^v\d+\.\d+\.\d+$"  # Match vX.Y.Z tags
+# Number of minor versions whose latest patch release is documented
+SMV_MINOR_VERSIONS = 3
+
+
+def _select_documented_tags(count):
+    """Select the version tags to document.
+
+    Picks the latest patch tag of each of the newest ``count`` minor versions,
+    e.g. ``v3.36.0``, ``v3.35.4`` and ``v3.34.0``.
+
+    Args:
+        count: Number of minor versions to document.
+
+    Returns:
+        The selected tag names, newest first. Empty when git is unavailable
+        or the working directory is not a git repository, as in the
+        per-version builds that sphinx-multiversion runs from exported trees.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "tag", "--list", "v*"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return []
+
+    versions = []
+    for tag in result.stdout.split():
+        match = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", tag)
+        if match:
+            versions.append((tuple(int(part) for part in match.groups()), tag))
+    versions.sort(reverse=True)
+
+    # Newest first, so the first tag seen for each minor version is its latest patch
+    latest = {}
+    for (major, minor, _), tag in versions:
+        latest.setdefault((major, minor), tag)
+    return list(latest.values())[:count]
+
+
+# Whitelist pattern for tags: only the tags selected above, or none
+_documented_tags = _select_documented_tags(SMV_MINOR_VERSIONS)
+smv_tag_whitelist = (
+    "^(" + "|".join(re.escape(tag) for tag in _documented_tags) + ")$"
+    if _documented_tags
+    else r"^$"
+)
 
 # Whitelist pattern for branches
 smv_branch_whitelist = r"^master$"  # Only build master branch
