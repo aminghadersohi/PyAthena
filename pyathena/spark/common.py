@@ -31,9 +31,10 @@ from pyathena.util import parse_output_location, retry_api_call
 
 _logger = logging.getLogger(__name__)
 
-# How often a wait for the start request returns to the interpreter, so that
-# a KeyboardInterrupt is raised promptly on every platform.
-_START_WAIT_INTERVAL = 0.1
+# How often a wait for the start request wakes up to check for Ctrl-C, so that
+# a KeyboardInterrupt is raised promptly where an untimed lock wait cannot be
+# interrupted by signals (Windows before Python 3.14).
+_INTERRUPT_CHECK_INTERVAL = 0.1
 
 
 class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
@@ -474,7 +475,7 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
             DatabaseError: If the request failed.
         """
         while not future.done():
-            wait((future,), timeout=_START_WAIT_INTERVAL)
+            wait((future,), timeout=_INTERRUPT_CHECK_INTERVAL)
         return future.result()
 
     def _cancel(self, query_id: str) -> None:
