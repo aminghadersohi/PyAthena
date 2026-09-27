@@ -230,8 +230,9 @@ def _select_documented_tags(count):
 
     Returns:
         The selected tag names, newest first. Empty when git is unavailable
-        or the working directory is not a git repository, as in the
-        per-version builds that sphinx-multiversion runs from exported trees.
+        or the configuration directory is not in a git repository, as when
+        sphinx-multiversion reads each version's configuration from its
+        exported tree. Only the selection from the invoking checkout is used.
     """
     try:
         result = subprocess.run(
