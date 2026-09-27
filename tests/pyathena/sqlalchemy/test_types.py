@@ -1,14 +1,7 @@
-from sqlalchemy import (
-    types,
-)
+from sqlalchemy import types
 
-from pyathena.sqlalchemy.types import (
-    get_double_type,
-)
+from pyathena.sqlalchemy.base import ischema_names
 
 
-def test_get_double_type():
-    from pyathena.sqlalchemy.base import ischema_names
-
-    assert get_double_type() is types.DOUBLE
+def test_double_column_type():
     assert ischema_names["double"] is types.DOUBLE
