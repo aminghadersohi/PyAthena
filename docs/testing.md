@@ -174,7 +174,7 @@ gh workflow run test.yaml --ref <branch> -f python-versions=3.11,3.14
 ```
 
 The Release workflow runs the same suites on every supported Python version for the tagged commit before building, and publishes nothing unless all of them pass.
-If they fail, nothing is published and the documentation is not rebuilt; delete the tag before the next push to master, which rebuilds the documentation for every version tag, then fix the failure and push the tag again.
+If they fail, nothing is published, and the documentation leaves out the tag because it only lists tags with a GitHub release; delete the tag, fix the failure, and push the tag again.
 
 Project policy excludes external-fork pull requests from AWS integration CI.
 Maintainers do not approve those jobs as a substitute for contributor testing.
