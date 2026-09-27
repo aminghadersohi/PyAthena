@@ -7,13 +7,17 @@
 
 import asyncio
 import textwrap
+import threading
+import uuid
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from botocore.exceptions import ClientError
 
 from pyathena.aio.spark.cursor import AioSparkCursor
-from pyathena.error import NotSupportedError, OperationalError
+from pyathena.error import DatabaseError, NotSupportedError, OperationalError
 from pyathena.model import AthenaCalculationExecutionStatus, AthenaSessionStatus
+from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.aio.conftest import _aio_connect
 from tests.pyathena.util import (
@@ -53,6 +57,51 @@ def _offline_cursor(kill_on_interrupt, final_state):
     cursor._get_calculation_execution = AsyncMock(return_value=MagicMock(state=final_state))
     cancel = cursor._cancel = AsyncMock()
     return cursor, cancel, polling
+
+
+_TIMEOUT = 10
+
+
+def _starting_cursor(kill_on_interrupt=True, response=None):
+    """An AioSparkCursor whose start request blocks in a thread until released.
+
+    Args:
+        kill_on_interrupt: Whether the cursor cancels the calculation on cancellation.
+        response: The exception the start request raises once released; the
+            default returns ``calculation_id``.
+
+    Returns:
+        The cursor, the mock of its cancellation request, an event set when the
+        start request starts, and an event that releases it.
+    """
+    started = threading.Event()
+    release = threading.Event()
+
+    def start_calculation_execution(**kwargs):
+        started.set()
+        assert release.wait(_TIMEOUT)
+        if response:
+            raise response
+        return {"CalculationExecutionId": "calculation_id"}
+
+    cursor = AioSparkCursor.__new__(AioSparkCursor)  # bypass __init__ to avoid AWS calls
+    cursor._session_id = "session_id"
+    cursor._connection = MagicMock()
+    cursor._connection.client.start_calculation_execution.side_effect = start_calculation_execution
+    cursor._retry_config = RetryConfig(attempt=2, multiplier=0)
+    cursor._poll_interval = 0
+    cursor._kill_on_interrupt = kill_on_interrupt
+    cursor._on_poll = None
+    cursor._calculation_id = None
+    cursor._calculation_execution = None
+    cursor._get_calculation_execution_status = AsyncMock(
+        return_value=MagicMock(state=AthenaCalculationExecutionStatus.STATE_CANCELED)
+    )
+    cursor._get_calculation_execution = AsyncMock(
+        return_value=MagicMock(state=AthenaCalculationExecutionStatus.STATE_CANCELED)
+    )
+    cancel = cursor._cancel = AsyncMock()
+    return cursor, cancel, started, release
 
 
 class TestAioSparkCursor:
@@ -283,6 +332,151 @@ class TestAioSparkCursor:
             session_id,
             AthenaSessionStatus.STATE_TERMINATED,
         )
+
+    @pytest.mark.parametrize("kill_on_interrupt", [True, False])
+    async def test_calculate_reuses_generated_token_on_retry(self, kill_on_interrupt):
+        cursor, _, _, release = _starting_cursor(kill_on_interrupt=kill_on_interrupt)
+        release.set()
+        client = cursor._connection.client
+        client.start_calculation_execution.side_effect = [
+            ClientError(
+                {"Error": {"Code": "ThrottlingException", "Message": "Rate exceeded"}},
+                "StartCalculationExecution",
+            ),
+            {"CalculationExecutionId": "calculation_id"},
+        ]
+
+        assert await cursor._calculate(session_id="session_id", code_block="code") == (
+            "calculation_id"
+        )
+
+        tokens = [
+            c.kwargs["ClientRequestToken"]
+            for c in client.start_calculation_execution.call_args_list
+        ]
+        assert len(tokens) == 2
+        assert tokens[0] == tokens[1]
+        uuid.UUID(tokens[0])
+
+    async def test_calculate_keeps_caller_token(self):
+        cursor, _, _, release = _starting_cursor()
+        release.set()
+
+        await cursor._calculate(
+            session_id="session_id", code_block="code", client_request_token="token"
+        )
+
+        cursor._connection.client.start_calculation_execution.assert_called_once_with(
+            SessionId="session_id", CodeBlock="code", ClientRequestToken="token"
+        )
+
+    async def test_execute_cancelled_while_starting(self):
+        cursor, cancel, started, release = _starting_cursor()
+        task = asyncio.create_task(cursor.execute("code"))
+        assert await asyncio.to_thread(started.wait, _TIMEOUT)
+        task.cancel()
+        # Let the task handle the cancellation before the start request finishes.
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert not task.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert task.cancelled()
+        cursor._connection.client.start_calculation_execution.assert_called_once()
+        cancel.assert_awaited_once_with("calculation_id")
+        assert cursor.calculation_id == "calculation_id"
+        assert cursor.state == AthenaCalculationExecutionStatus.STATE_CANCELED
+
+    async def test_execute_timeout_while_starting(self):
+        cursor, cancel, started, release = _starting_cursor()
+        timer = threading.Timer(0.2, release.set)
+        timer.start()
+        try:
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(cursor.execute("code"), timeout=0.05)
+        finally:
+            timer.cancel()
+            release.set()
+
+        assert started.is_set()
+        cancel.assert_awaited_once_with("calculation_id")
+        assert cursor.calculation_id == "calculation_id"
+
+    @pytest.mark.parametrize("failing", ["start", "cancel", "wait"])
+    async def test_execute_cancelled_while_starting_failure(self, failing):
+        error = OperationalError("failed")
+        cursor, cancel, started, release = _starting_cursor(
+            response=ClientError(
+                {"Error": {"Code": "InvalidRequestException", "Message": "failed"}},
+                "StartCalculationExecution",
+            )
+            if failing == "start"
+            else None
+        )
+        if failing == "cancel":
+            cancel.side_effect = error
+        if failing == "wait":
+            cursor._get_calculation_execution_status.side_effect = error
+        raised = []
+
+        async def execute():
+            try:
+                await cursor.execute("code")
+            except asyncio.CancelledError as e:
+                raised.append(e)
+                raise
+
+        task = asyncio.create_task(execute())
+        assert await asyncio.to_thread(started.wait, _TIMEOUT)
+        task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert task.cancelled()
+        assert cursor.calculation_execution is None
+        if failing == "start":
+            assert isinstance(raised[0].__cause__, DatabaseError)
+            cancel.assert_not_awaited()
+            assert cursor.calculation_id is None
+        else:
+            assert raised[0].__cause__ is error
+            cancel.assert_awaited_once_with("calculation_id")
+            assert cursor.calculation_id == "calculation_id"
+
+    async def test_execute_second_cancellation_while_starting(self):
+        cursor, cancel, started, release = _starting_cursor()
+        task = asyncio.create_task(cursor.execute("code"))
+        assert await asyncio.to_thread(started.wait, _TIMEOUT)
+        try:
+            task.cancel()
+            for _ in range(5):
+                await asyncio.sleep(0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            release.set()
+
+        assert task.cancelled()
+        cancel.assert_not_awaited()
+
+    async def test_execute_cancelled_while_starting_without_kill_on_interrupt(self):
+        cursor, cancel, started, release = _starting_cursor(kill_on_interrupt=False)
+        task = asyncio.create_task(cursor.execute("code"))
+        assert await asyncio.to_thread(started.wait, _TIMEOUT)
+        try:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            release.set()
+
+        assert task.cancelled()
+        cancel.assert_not_awaited()
+        assert cursor.calculation_id is None
 
     async def test_executemany(self, aio_spark_cursor):
         with pytest.raises(NotSupportedError):
