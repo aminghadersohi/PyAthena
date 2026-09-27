@@ -82,7 +82,7 @@ jobs:
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           # Every supported version, oldest first; keep in sync with the
-          # pyproject.toml classifiers, which the Release workflow checks.
+          # pyproject.toml classifiers.
           PYTHON_VERSIONS: '["3.10", "3.11", "3.12", "3.13", "3.14"]'
         run: |
           if [[ "$EVENT_NAME" != "pull_request" ]]; then
