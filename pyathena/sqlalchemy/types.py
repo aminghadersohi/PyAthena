@@ -6,7 +6,7 @@ so existing ``pyathena.sqlalchemy.types`` imports remain supported.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from sqlalchemy import types
 from sqlalchemy.sql import sqltypes
@@ -32,17 +32,7 @@ __all__ = [
     "AthenaStruct",
     "AthenaTimestamp",
     "Tinyint",
-    "get_double_type",
 ]
-
-
-def get_double_type() -> type[Any]:
-    """Get the SQLAlchemy type for Athena DOUBLE.
-
-    Returns:
-        ``types.DOUBLE``.
-    """
-    return types.DOUBLE
 
 
 class AthenaBinary(types.LargeBinary):
