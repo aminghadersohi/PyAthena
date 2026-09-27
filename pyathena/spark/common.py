@@ -378,13 +378,13 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
         of starting another one.
 
         With ``kill_on_interrupt`` enabled, the request runs on a helper thread.
-        When a ``KeyboardInterrupt`` is handled, a request the helper has not yet
-        begun is abandoned: the helper never sends it and the interrupt
-        propagates. If the helper has already begun the request, the cursor waits
-        for it to finish, requests cancellation of the calculation it started,
-        waits for a terminal state, stores the calculation ID and execution on the
-        cursor, and re-raises the interrupt. Another ``KeyboardInterrupt`` during
-        that wait propagates at once.
+        On ``KeyboardInterrupt``, the cursor first tries to abandon the request.
+        This succeeds only if the helper has not begun the request by then; the
+        helper then never sends it, and the interrupt propagates. Otherwise the
+        cursor waits for the request to finish, requests cancellation of the
+        calculation it started, waits for a terminal state, stores the calculation
+        ID and execution on the cursor, and re-raises the interrupt. Another
+        ``KeyboardInterrupt`` during that wait propagates at once.
 
         Args:
             session_id: The session ID.
