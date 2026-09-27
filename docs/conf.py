@@ -91,9 +91,48 @@ def config_inited(app, config):
     config.release = f"v{ver}"
 
 
+def _parse_version_tag(name):
+    """Parse a release tag name.
+
+    Args:
+        name: Git ref name, e.g. ``v3.36.0`` or ``master``.
+
+    Returns:
+        The ``(major, minor, patch)`` integers, or None if the name is not a
+        ``vX.Y.Z`` tag.
+    """
+    match = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", name)
+    return tuple(int(part) for part in match.groups()) if match else None
+
+
+def add_versions_newest_first(app, pagename, templatename, context, doctree):
+    """Handler for html-page-context event to order the version switcher.
+
+    Adds ``versions_newest_first`` to the template context: the branches
+    (``master``) first, then the tags from the newest version to the oldest.
+    sphinx-multiversion's own ``versions`` lists tags in ref name order, which
+    puts the oldest first and would sort ``v4.10.0`` before ``v4.9.0``.
+
+    Args:
+        app: Sphinx application.
+        pagename: Name of the page being rendered.
+        templatename: Name of the page template.
+        context: Template context, updated in place.
+        doctree: Doctree of the page, or None for generated pages.
+    """
+    versions = context.get("versions")
+    if versions:
+        context["versions_newest_first"] = [
+            *versions.branches,
+            *sorted(versions.tags, key=lambda item: _parse_version_tag(item.name), reverse=True),
+        ]
+
+
 def setup(app):
     """Sphinx setup hook."""
     app.connect("config-inited", config_inited)
+    # Run after sphinx-multiversion adds ``versions`` at the default priority
+    app.connect("html-page-context", add_versions_newest_first, priority=600)
 
 
 # -- Project information -----------------------------------------------------
@@ -223,7 +262,10 @@ def _select_documented_tags(count):
     """Select the version tags to document.
 
     Picks the latest patch tag of each of the newest ``count`` minor versions,
-    e.g. ``v3.36.0``, ``v3.35.4`` and ``v3.34.0``.
+    e.g. ``v3.36.0``, ``v3.35.4`` and ``v3.34.0``. The latest tag of the
+    previous major version is added when those minor versions do not include
+    it and it has the Sphinx documentation, e.g. ``v3.36.1`` after ``v4.2.0``,
+    ``v4.1.0`` and ``v4.0.0``.
 
     Args:
         count: Number of minor versions to document.
@@ -244,18 +286,52 @@ def _select_documented_tags(count):
     except (subprocess.CalledProcessError, FileNotFoundError):
         return []
 
-    versions = []
-    for tag in result.stdout.split():
-        match = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", tag)
-        if match:
-            versions.append((tuple(int(part) for part in match.groups()), tag))
-    versions.sort(reverse=True)
+    versions = sorted(
+        (
+            (version, tag)
+            for tag in result.stdout.split()
+            if (version := _parse_version_tag(tag)) is not None
+        ),
+        reverse=True,
+    )
+    if not versions:
+        return []
 
     # Newest first, so the first tag seen for each minor version is its latest patch
     latest = {}
     for (major, minor, _), tag in versions:
         latest.setdefault((major, minor), tag)
-    return list(latest.values())[:count]
+    selected = list(latest.values())[:count]
+
+    newest_major = versions[0][0][0]
+    previous_major_latest = next(
+        (tag for (major, _, _), tag in versions if major < newest_major), None
+    )
+    if (
+        previous_major_latest
+        and previous_major_latest not in selected
+        and _has_sphinx_docs(previous_major_latest)
+    ):
+        selected.append(previous_major_latest)
+    return selected
+
+
+def _has_sphinx_docs(tag):
+    """Return whether a tag contains the Sphinx documentation.
+
+    Tags before ``v3.5.0``, including all ``v2`` tags, have no ``docs/conf.py``.
+
+    Args:
+        tag: Git tag name.
+
+    Returns:
+        True if ``docs/conf.py`` exists in the tag.
+    """
+    result = subprocess.run(
+        ["git", "cat-file", "-e", f"{tag}:docs/conf.py"],
+        capture_output=True,
+    )
+    return result.returncode == 0
 
 
 # Whitelist pattern for tags: only the tags selected above, or none
