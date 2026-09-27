@@ -34,16 +34,26 @@ from sqlalchemy.testing import eq_, fixtures
 from sqlalchemy.testing.schema import Column, Table
 from sqlalchemy.testing.suite import *  # noqa: F403
 from sqlalchemy.testing.suite import BinaryTest as _BinaryTest
+from sqlalchemy.testing.suite import CollateTest as _CollateTest
 from sqlalchemy.testing.suite import ComponentReflectionTest as _ComponentReflectionTest
 from sqlalchemy.testing.suite import ComponentReflectionTestExtra as _ComponentReflectionTestExtra
+from sqlalchemy.testing.suite import CompoundSelectTest as _CompoundSelectTest
 from sqlalchemy.testing.suite import CTETest as _CTETest
+from sqlalchemy.testing.suite import DeprecatedCompoundSelectTest as _DeprecatedCompoundSelectTest
 from sqlalchemy.testing.suite import DifficultParametersTest as _DifficultParametersTest
+from sqlalchemy.testing.suite import ExistsTest as _ExistsTest
+from sqlalchemy.testing.suite import ExpandingBoundInTest as _ExpandingBoundInTest
 from sqlalchemy.testing.suite import FetchLimitOffsetTest as _FetchLimitOffsetTest
 from sqlalchemy.testing.suite import HasTableTest as _HasTableTest
 from sqlalchemy.testing.suite import InsertBehaviorTest as _InsertBehaviorTest
 from sqlalchemy.testing.suite import LongNameBlowoutTest as _LongNameBlowoutTest
+from sqlalchemy.testing.suite import OrderByLabelTest as _OrderByLabelTest
+from sqlalchemy.testing.suite import PostCompileParamsTest as _PostCompileParamsTest
 from sqlalchemy.testing.suite import QuotedNameArgumentTest as _QuotedNameArgumentTest
+from sqlalchemy.testing.suite import RowFetchTest as _RowFetchTest
+from sqlalchemy.testing.suite import SameNamedSchemaTableTest as _SameNamedSchemaTableTest
 from sqlalchemy.testing.suite import SimpleUpdateDeleteTest as _SimpleUpdateDeleteTest
+from sqlalchemy.testing.suite import WindowFunctionTest as _WindowFunctionTest
 
 from pyathena.error import OperationalError
 from pyathena.sqlalchemy.types import (
@@ -1201,6 +1211,9 @@ class InsertBehaviorTest(_InsertBehaviorTest):
 
 
 class FetchLimitOffsetTest(_FetchLimitOffsetTest):
+    run_inserts = "once"
+    run_deletes = None
+
     @pytest.mark.skip("Athena does not support expressions in the offset clause.")
     def test_simple_limit_expr_offset(self, connection):
         pass
@@ -1220,3 +1233,56 @@ class FetchLimitOffsetTest(_FetchLimitOffsetTest):
     @pytest.mark.skip("Athena does not support expressions in the offset clause.")
     def test_expr_offset(self, connection):
         pass
+
+
+# The tests of these classes only read their fixture rows, so the rows are inserted
+# once per class instead of being inserted and deleted around every test; each of
+# those statements is an Iceberg commit. FetchLimitOffsetTest does the same above.
+class CollateTest(_CollateTest):
+    run_inserts = "once"
+    run_deletes = None
+
+
+class CompoundSelectTest(_CompoundSelectTest):
+    run_inserts = "once"
+    run_deletes = None
+
+
+class DeprecatedCompoundSelectTest(_DeprecatedCompoundSelectTest):
+    run_inserts = "once"
+    run_deletes = None
+
+
+class ExistsTest(_ExistsTest):
+    run_inserts = "once"
+    run_deletes = None
+
+
+class ExpandingBoundInTest(_ExpandingBoundInTest):
+    run_inserts = "once"
+    run_deletes = None
+
+
+class OrderByLabelTest(_OrderByLabelTest):
+    run_inserts = "once"
+    run_deletes = None
+
+
+class PostCompileParamsTest(_PostCompileParamsTest):
+    run_inserts = "once"
+    run_deletes = None
+
+
+class RowFetchTest(_RowFetchTest):
+    run_inserts = "once"
+    run_deletes = None
+
+
+class SameNamedSchemaTableTest(_SameNamedSchemaTableTest):
+    run_inserts = "once"
+    run_deletes = None
+
+
+class WindowFunctionTest(_WindowFunctionTest):
+    run_inserts = "once"
+    run_deletes = None
