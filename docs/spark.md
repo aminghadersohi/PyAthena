@@ -294,6 +294,8 @@ A cancellation request sent right after a calculation starts can occasionally ha
 
 Unless `client_request_token` is passed to `execute()`, the cursor sends a generated `ClientRequestToken` with each calculation.
 A retried start request then returns the calculation that an earlier attempt started instead of starting another one.
+A token passed to `execute()` must be unique for each calculation:
+Athena returns the earlier calculation for a reused token, even when the code differs.
 
 (async-spark-cursor)=
 
