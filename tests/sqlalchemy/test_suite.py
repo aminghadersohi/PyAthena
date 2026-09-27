@@ -104,6 +104,35 @@ del TimeTest  # noqa: F821
 del UuidTest  # noqa: F821
 
 
+class _InsertFixtureRowsOnce:
+    """Insert a compliance class's fixture rows once instead of around every test.
+
+    SQLAlchemy's ``TablesTest`` inserts the fixture rows before each test and
+    deletes them after it; on Athena each of those statements is an Iceberg
+    commit. Mix this into classes whose tests only read their fixture rows.
+    """
+
+    run_inserts = "once"
+    run_deletes = None
+
+    @classmethod
+    def _setup_once_inserts(cls):
+        """Insert the fixture rows, dropping the class's tables if that fails.
+
+        SQLAlchemy registers the class teardown that drops the tables only after
+        the inserts succeed. A table left behind would break a later class on the
+        same worker that defines a table of the same name differently.
+
+        Raises:
+            BaseException: Whatever the inserts raised, after the tables are dropped.
+        """
+        try:
+            super()._setup_once_inserts()  # type: ignore[misc]
+        except BaseException:
+            cls._teardown_once_metadata_bind()  # type: ignore[attr-defined]
+            raise
+
+
 class BinaryTest(_BinaryTest):
     @sa_testing.combinations(types.LargeBinary, types.BINARY, types.VARBINARY, argnames="datatype")
     @sa_testing.combinations(
@@ -1210,10 +1239,7 @@ class InsertBehaviorTest(_InsertBehaviorTest):
         pass
 
 
-class FetchLimitOffsetTest(_FetchLimitOffsetTest):
-    run_inserts = "once"
-    run_deletes = None
-
+class FetchLimitOffsetTest(_InsertFixtureRowsOnce, _FetchLimitOffsetTest):
     @pytest.mark.skip("Athena does not support expressions in the offset clause.")
     def test_simple_limit_expr_offset(self, connection):
         pass
@@ -1235,54 +1261,41 @@ class FetchLimitOffsetTest(_FetchLimitOffsetTest):
         pass
 
 
-# The tests of these classes only read their fixture rows, so the rows are inserted
-# once per class instead of being inserted and deleted around every test; each of
-# those statements is an Iceberg commit. FetchLimitOffsetTest does the same above.
-class CollateTest(_CollateTest):
-    run_inserts = "once"
-    run_deletes = None
+class CollateTest(_InsertFixtureRowsOnce, _CollateTest):
+    pass
 
 
-class CompoundSelectTest(_CompoundSelectTest):
-    run_inserts = "once"
-    run_deletes = None
+class CompoundSelectTest(_InsertFixtureRowsOnce, _CompoundSelectTest):
+    pass
 
 
-class DeprecatedCompoundSelectTest(_DeprecatedCompoundSelectTest):
-    run_inserts = "once"
-    run_deletes = None
+class DeprecatedCompoundSelectTest(_InsertFixtureRowsOnce, _DeprecatedCompoundSelectTest):
+    pass
 
 
-class ExistsTest(_ExistsTest):
-    run_inserts = "once"
-    run_deletes = None
+class ExistsTest(_InsertFixtureRowsOnce, _ExistsTest):
+    pass
 
 
-class ExpandingBoundInTest(_ExpandingBoundInTest):
-    run_inserts = "once"
-    run_deletes = None
+class ExpandingBoundInTest(_InsertFixtureRowsOnce, _ExpandingBoundInTest):
+    pass
 
 
-class OrderByLabelTest(_OrderByLabelTest):
-    run_inserts = "once"
-    run_deletes = None
+class OrderByLabelTest(_InsertFixtureRowsOnce, _OrderByLabelTest):
+    pass
 
 
-class PostCompileParamsTest(_PostCompileParamsTest):
-    run_inserts = "once"
-    run_deletes = None
+class PostCompileParamsTest(_InsertFixtureRowsOnce, _PostCompileParamsTest):
+    pass
 
 
-class RowFetchTest(_RowFetchTest):
-    run_inserts = "once"
-    run_deletes = None
+class RowFetchTest(_InsertFixtureRowsOnce, _RowFetchTest):
+    pass
 
 
-class SameNamedSchemaTableTest(_SameNamedSchemaTableTest):
-    run_inserts = "once"
-    run_deletes = None
+class SameNamedSchemaTableTest(_InsertFixtureRowsOnce, _SameNamedSchemaTableTest):
+    pass
 
 
-class WindowFunctionTest(_WindowFunctionTest):
-    run_inserts = "once"
-    run_deletes = None
+class WindowFunctionTest(_InsertFixtureRowsOnce, _WindowFunctionTest):
+    pass
