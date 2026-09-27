@@ -365,6 +365,35 @@ class TestSparkBaseCursor:
         cursor._cancel.assert_not_called()
 
     @pytest.mark.parametrize("cursor_class", SYNC_SPARK_CURSOR_CLASSES)
+    @pytest.mark.parametrize("helper_starts", [False, True])
+    def test_calculate_interrupted_before_request_is_sent(self, cursor_class, helper_starts):
+        cursor = _calculation_cursor(cursor_class)
+        targets = []
+
+        class InterruptedThread:
+            """A thread whose start() is interrupted; the test runs its target later."""
+
+            def __init__(self, target, name, daemon):
+                targets.append(target)
+
+            def start(self):
+                raise KeyboardInterrupt
+
+        with (
+            patch("pyathena.spark.common.threading.Thread", InterruptedThread),
+            pytest.raises(KeyboardInterrupt) as exc_info,
+        ):
+            cursor._calculate(session_id="session_id", code_block="code")
+        if helper_starts:
+            # The helper thread starts running after the interrupt was handled.
+            targets[0]()
+
+        assert exc_info.value.__cause__ is None
+        cursor._connection.client.start_calculation_execution.assert_not_called()
+        cursor._cancel.assert_not_called()
+        assert cursor.calculation_id is None
+
+    @pytest.mark.parametrize("cursor_class", SYNC_SPARK_CURSOR_CLASSES)
     def test_calculate_interrupt_without_kill_on_interrupt(self, cursor_class):
         cursor = _calculation_cursor(cursor_class, kill_on_interrupt=False)
         cursor._connection.client.start_calculation_execution.side_effect = KeyboardInterrupt()

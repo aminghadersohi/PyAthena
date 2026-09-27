@@ -378,10 +378,12 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
         of starting another one.
 
         With ``kill_on_interrupt`` enabled, the request runs on a helper thread.
-        On ``KeyboardInterrupt``, waits for the request to finish, requests
-        cancellation of the calculation it started, waits for a terminal state,
-        stores the calculation ID and execution on the cursor, and re-raises the
-        interrupt. Another ``KeyboardInterrupt`` during that wait propagates at once.
+        A ``KeyboardInterrupt`` before the helper sends the request propagates, and
+        the request is not sent. A later one waits for the request to finish,
+        requests cancellation of the calculation it started, waits for a terminal
+        state, stores the calculation ID and execution on the cursor, and re-raises
+        the interrupt. Another ``KeyboardInterrupt`` during that wait propagates at
+        once.
 
         Args:
             session_id: The session ID.
@@ -410,15 +412,21 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
         future: Future[str] = Future()
 
         def start() -> None:
+            # Send nothing if the interrupt already gave up on this request.
+            if not future.set_running_or_notify_cancel():
+                return
             try:
                 future.set_result(self.__start_calculation(request))
             except BaseException as e:
                 future.set_exception(e)
 
-        threading.Thread(target=start, name="pyathena-spark-start", daemon=True).start()
         try:
+            threading.Thread(target=start, name="pyathena-spark-start", daemon=True).start()
             return self.__wait_for_start(future)
         except KeyboardInterrupt as interrupt:
+            if future.cancel():
+                # The request has not been sent and never will be.
+                raise
             _logger.warning("Query canceled by user.")
             try:
                 self._calculation_id = self.__wait_for_start(future)
