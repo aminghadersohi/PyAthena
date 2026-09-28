@@ -169,21 +169,23 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
             client_request_token=client_request_token or str(uuid.uuid4()),
         )
         if not self._kill_on_interrupt:
-            return await self.__start_calculation(request)
+            return await self._start_calculation_execution(request)
 
-        start = asyncio.ensure_future(self.__start_calculation(request))
+        start = asyncio.ensure_future(self._start_calculation_execution(request))
         try:
             return await asyncio.shield(start)
         except asyncio.CancelledError as cancellation:
             _logger.warning("Query canceled by user.")
             try:
                 self._calculation_id = await start
-                await self.__cancel_and_wait(self._calculation_id)
+                await self._cancel_and_wait(self._calculation_id)
             except Exception as e:
                 raise cancellation from e
             raise
 
-    async def __start_calculation(self, request: dict[str, Any]) -> str:
+    async def _start_calculation_execution(  # type: ignore[override]
+        self, request: dict[str, Any]
+    ) -> str:
         """Send a ``StartCalculationExecution`` request.
 
         Args:
@@ -207,16 +209,28 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
             raise DatabaseError(*e.args) from e
         return cast(str, response.get("CalculationExecutionId"))
 
-    async def __poll(self, query_id: str) -> AthenaQueryExecution | AthenaCalculationExecution:
+    async def _poll_until_terminal(  # type: ignore[override]
+        self, query_id: str
+    ) -> AthenaQueryExecution | AthenaCalculationExecution:
+        """Poll a calculation execution until it reaches a terminal state.
+
+        Calls ``on_poll`` with every status and awaits ``poll_interval`` seconds
+        between requests.
+
+        Args:
+            query_id: The calculation execution ID.
+
+        Returns:
+            The calculation execution in a terminal state.
+
+        Raises:
+            OperationalError: If a status request fails.
+        """
         while True:
             calculation_status = await self._get_calculation_execution_status(query_id)
             if self._on_poll:
                 self._on_poll(calculation_status)
-            if calculation_status.state in [
-                AthenaCalculationExecutionStatus.STATE_COMPLETED,
-                AthenaCalculationExecutionStatus.STATE_FAILED,
-                AthenaCalculationExecutionStatus.STATE_CANCELED,
-            ]:
+            if calculation_status.state in AthenaCalculationExecutionStatus.TERMINAL_STATES:
                 return await self._get_calculation_execution(query_id)
             await asyncio.sleep(self._poll_interval)
 
@@ -244,18 +258,18 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
             OperationalError: If a status request fails.
         """
         try:
-            return await self.__poll(query_id)
+            return await self._poll_until_terminal(query_id)
         except asyncio.CancelledError as cancellation:
             if not self._kill_on_interrupt:
                 raise
             _logger.warning("Query canceled by user.")
             try:
-                await self.__cancel_and_wait(query_id)
+                await self._cancel_and_wait(query_id)
             except Exception as e:
                 raise cancellation from e
             raise
 
-    async def __cancel_and_wait(self, calculation_id: str) -> None:
+    async def _cancel_and_wait(self, calculation_id: str) -> None:  # type: ignore[override]
         """Request cancellation and store the calculation's terminal state.
 
         Args:
@@ -266,7 +280,7 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
         """
         await self._cancel(calculation_id)
         self._calculation_execution = cast(
-            AthenaCalculationExecution, await self.__poll(calculation_id)
+            AthenaCalculationExecution, await self._poll_until_terminal(calculation_id)
         )
 
     async def _cancel(self, query_id: str) -> None:  # type: ignore[override]
@@ -292,7 +306,7 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
                 **request,
             )
         except Exception as e:
-            _logger.exception("Failed to terminate session.")
+            _logger.exception(f"Failed to terminate session: {self._session_id}.")
             raise OperationalError(*e.args) from e
 
     async def _read_s3_file_as_text(self, uri) -> str:  # type: ignore[override]
