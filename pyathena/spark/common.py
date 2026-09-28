@@ -9,14 +9,17 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import threading
 import time
+import uuid
 from abc import ABCMeta, abstractmethod
+from concurrent.futures import Future, wait
 from datetime import datetime
 from typing import Any, cast
 
 import botocore
 
-from pyathena import NotSupportedError, OperationalError
+from pyathena import DatabaseError, NotSupportedError, OperationalError
 from pyathena.common import BaseCursor
 from pyathena.model import (
     AthenaCalculationExecution,
@@ -27,6 +30,11 @@ from pyathena.model import (
 from pyathena.util import parse_output_location, retry_api_call
 
 _logger = logging.getLogger(__name__)
+
+# How often a wait for the start request wakes up to check for Ctrl-C, so that
+# a KeyboardInterrupt is raised promptly where an untimed lock wait cannot be
+# interrupted by signals (Windows before Python 3.14).
+_INTERRUPT_CHECK_INTERVAL = 0.1
 
 
 class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
@@ -340,13 +348,135 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
                 raise
             _logger.warning("Query canceled by user.")
             try:
-                self._cancel(query_id)
-                self._calculation_execution = cast(
-                    AthenaCalculationExecution, self.__poll(query_id)
-                )
+                self.__cancel_and_wait(query_id)
             except Exception as e:
                 raise interrupt from e
             raise
+
+    def __cancel_and_wait(self, calculation_id: str) -> None:
+        """Request cancellation and store the calculation's terminal state.
+
+        Args:
+            calculation_id: The calculation execution ID.
+
+        Raises:
+            OperationalError: If the cancellation or a status request fails.
+        """
+        self._cancel(calculation_id)
+        self._calculation_execution = cast(AthenaCalculationExecution, self.__poll(calculation_id))
+
+    def _calculate(
+        self,
+        session_id: str,
+        code_block: str,
+        description: str | None = None,
+        client_request_token: str | None = None,
+    ) -> str:
+        """Start a calculation execution with ``StartCalculationExecution``.
+
+        Without ``client_request_token``, a generated token is sent, so that a
+        retried request returns the calculation an earlier attempt started instead
+        of starting another one.
+
+        With ``kill_on_interrupt`` enabled, the request runs on a helper thread.
+        On ``KeyboardInterrupt``, the cursor first tries to abandon the request.
+        This succeeds only if the helper has not begun the request by then; the
+        helper then never sends it, and the interrupt propagates. Otherwise the
+        cursor waits for the request to finish, requests cancellation of the
+        calculation it started, waits for a terminal state, stores the calculation
+        ID and execution on the cursor, and re-raises the interrupt. Another
+        ``KeyboardInterrupt`` during that wait propagates at once.
+
+        Args:
+            session_id: The session ID.
+            code_block: The code to run.
+            description: The calculation description.
+            client_request_token: The idempotency token of the request.
+
+        Returns:
+            The calculation execution ID.
+
+        Raises:
+            KeyboardInterrupt: If interrupted while starting the calculation. A
+                failure to start, cancel, or wait for the calculation becomes its
+                ``__cause__``.
+            DatabaseError: If the request fails.
+        """
+        request = self._build_start_calculation_execution_request(
+            session_id=session_id,
+            code_block=code_block,
+            description=description,
+            client_request_token=client_request_token or str(uuid.uuid4()),
+        )
+        if not self._kill_on_interrupt:
+            return self.__start_calculation(request)
+
+        future: Future[str] = Future()
+
+        def start() -> None:
+            # Begin the request only if no interrupt has given up on it yet.
+            if not future.set_running_or_notify_cancel():
+                return
+            try:
+                future.set_result(self.__start_calculation(request))
+            except BaseException as e:
+                future.set_exception(e)
+
+        try:
+            threading.Thread(target=start, name="pyathena-spark-start", daemon=True).start()
+            return self.__wait_for_start(future)
+        except KeyboardInterrupt as interrupt:
+            if future.cancel():
+                # The helper has not begun the request and never will.
+                raise
+            _logger.warning("Query canceled by user.")
+            try:
+                self._calculation_id = self.__wait_for_start(future)
+                self.__cancel_and_wait(self._calculation_id)
+            except Exception as e:
+                raise interrupt from e
+            raise
+
+    def __start_calculation(self, request: dict[str, Any]) -> str:
+        """Send a ``StartCalculationExecution`` request.
+
+        Args:
+            request: The request parameters.
+
+        Returns:
+            The calculation execution ID.
+
+        Raises:
+            DatabaseError: If the request fails.
+        """
+        try:
+            response = retry_api_call(
+                self._connection.client.start_calculation_execution,
+                config=self._retry_config,
+                logger=_logger,
+                **request,
+            )
+        except Exception as e:
+            _logger.exception("Failed to execute calculation.")
+            raise DatabaseError(*e.args) from e
+        return cast(str, response.get("CalculationExecutionId"))
+
+    @staticmethod
+    def __wait_for_start(future: Future[str]) -> str:
+        """Wait for the start request on a helper thread to finish.
+
+        Args:
+            future: The future of the start request.
+
+        Returns:
+            The calculation execution ID.
+
+        Raises:
+            DatabaseError: If the request failed.
+        """
+        while not future.done():
+            wait((future,), timeout=_INTERRUPT_CHECK_INTERVAL)
+        return future.result()
 
     def _cancel(self, query_id: str) -> None:
         """Stop a calculation execution with ``StopCalculationExecution``.

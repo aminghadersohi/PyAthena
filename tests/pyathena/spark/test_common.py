@@ -7,20 +7,25 @@
 
 import asyncio
 import logging
+import threading
+import uuid
+from concurrent.futures import wait
 from unittest.mock import MagicMock, patch
 
 import pytest
 from botocore.exceptions import ClientError
 
-from pyathena import OperationalError
+from pyathena import DatabaseError, OperationalError
 from pyathena.aio.spark.cursor import AioSparkCursor
-from pyathena.model import AthenaSessionStatus
+from pyathena.model import AthenaCalculationExecutionStatus, AthenaSessionStatus
 from pyathena.spark.async_cursor import AsyncSparkCursor
 from pyathena.spark.common import SparkBaseCursor
 from pyathena.spark.cursor import SparkCursor
 from pyathena.util import RetryConfig
 
 SPARK_CURSOR_CLASSES = [SparkCursor, AsyncSparkCursor, AioSparkCursor]
+SYNC_SPARK_CURSOR_CLASSES = [SparkCursor, AsyncSparkCursor]
+_TIMEOUT = 10
 
 
 def _session_status(state: str, reason: str | None = None) -> AthenaSessionStatus:
@@ -45,6 +50,91 @@ def _connection():
         "Status": {"State": AthenaSessionStatus.STATE_IDLE}
     }
     return connection
+
+
+def _calculation_cursor(cursor_class, kill_on_interrupt=True):
+    """A cursor whose calculation requests go to a mocked Athena client.
+
+    Args:
+        cursor_class: The synchronous Spark cursor class.
+        kill_on_interrupt: Whether the cursor cancels the calculation on interrupt.
+
+    Returns:
+        The cursor. Its ``_cancel`` is a mock, and status requests report
+        ``CANCELED``.
+    """
+    cursor = cursor_class.__new__(cursor_class)  # bypass __init__ to avoid AWS calls
+    cursor._session_id = "session_id"
+    cursor._connection = MagicMock()
+    cursor._connection.client.start_calculation_execution.return_value = {
+        "CalculationExecutionId": "calculation_id"
+    }
+    cursor._retry_config = RetryConfig(attempt=2, multiplier=0)
+    cursor._poll_interval = 0
+    cursor._kill_on_interrupt = kill_on_interrupt
+    cursor._on_poll = None
+    cursor._calculation_id = None
+    cursor._calculation_execution = None
+    cursor._cancel = MagicMock()
+    cursor._get_calculation_execution_status = MagicMock(
+        return_value=MagicMock(state=AthenaCalculationExecutionStatus.STATE_CANCELED)
+    )
+    cursor._get_calculation_execution = MagicMock(
+        return_value=MagicMock(state=AthenaCalculationExecutionStatus.STATE_CANCELED)
+    )
+    return cursor
+
+
+def _block_start(cursor, response=None):
+    """Make the cursor's start request block until released.
+
+    Args:
+        cursor: The cursor from ``_calculation_cursor``.
+        response: The exception to raise once released; the default returns
+            ``calculation_id``.
+
+    Returns:
+        An event set when the request starts, and an event that releases it.
+    """
+    started = threading.Event()
+    release = threading.Event()
+
+    def start_calculation_execution(**kwargs):
+        started.set()
+        assert release.wait(_TIMEOUT)
+        if response:
+            raise response
+        return {"CalculationExecutionId": "calculation_id"}
+
+    cursor._connection.client.start_calculation_execution.side_effect = start_calculation_execution
+    return started, release
+
+
+def _interrupt_waits(started, release, interrupts=1):
+    """Patch the wait for the start request to raise KeyboardInterrupt.
+
+    The first ``interrupts`` waits raise ``KeyboardInterrupt`` once the request
+    has started; later waits release the request and wait for it.
+
+    Args:
+        started: Set when the start request starts.
+        release: Releases the start request.
+        interrupts: How many waits raise.
+
+    Returns:
+        The patcher, and the list of raised interrupts.
+    """
+    raised = []
+
+    def interrupting_wait(futures, timeout=None):
+        if len(raised) < interrupts:
+            assert started.wait(_TIMEOUT)
+            raised.append(KeyboardInterrupt())
+            raise raised[-1]
+        release.set()
+        return wait(futures, timeout)
+
+    return patch("pyathena.spark.common.wait", side_effect=interrupting_wait), raised
 
 
 def _init_cursor(cursor_class, connection, **kwargs):
@@ -147,6 +237,187 @@ class TestSparkBaseCursor:
         ):
             cursor._exists_session("session_id")
         cursor._connection.client.get_session.assert_called_once_with(SessionId="session_id")
+
+    @pytest.mark.parametrize("cursor_class", SYNC_SPARK_CURSOR_CLASSES)
+    @pytest.mark.parametrize("kill_on_interrupt", [True, False])
+    def test_calculate_reuses_generated_token_on_retry(self, cursor_class, kill_on_interrupt):
+        cursor = _calculation_cursor(cursor_class, kill_on_interrupt=kill_on_interrupt)
+        client = cursor._connection.client
+        client.start_calculation_execution.side_effect = [
+            ClientError(
+                {"Error": {"Code": "ThrottlingException", "Message": "Rate exceeded"}},
+                "StartCalculationExecution",
+            ),
+            {"CalculationExecutionId": "calculation_id"},
+        ]
+
+        assert cursor._calculate(session_id="session_id", code_block="code") == "calculation_id"
+
+        tokens = [
+            c.kwargs["ClientRequestToken"]
+            for c in client.start_calculation_execution.call_args_list
+        ]
+        assert len(tokens) == 2
+        assert tokens[0] == tokens[1]
+        uuid.UUID(tokens[0])
+        for thread in threading.enumerate():
+            if thread.name == "pyathena-spark-start":
+                thread.join(_TIMEOUT)
+                assert not thread.is_alive()
+
+    @pytest.mark.parametrize("cursor_class", SYNC_SPARK_CURSOR_CLASSES)
+    def test_calculate_generates_token_per_call(self, cursor_class):
+        cursor = _calculation_cursor(cursor_class)
+        client = cursor._connection.client
+
+        cursor._calculate(session_id="session_id", code_block="code")
+        cursor._calculate(session_id="session_id", code_block="code")
+
+        tokens = [
+            c.kwargs["ClientRequestToken"]
+            for c in client.start_calculation_execution.call_args_list
+        ]
+        assert tokens[0] != tokens[1]
+
+    @pytest.mark.parametrize("cursor_class", SYNC_SPARK_CURSOR_CLASSES)
+    def test_calculate_keeps_caller_token(self, cursor_class):
+        cursor = _calculation_cursor(cursor_class)
+
+        cursor._calculate(session_id="session_id", code_block="code", client_request_token="token")
+
+        cursor._connection.client.start_calculation_execution.assert_called_once_with(
+            SessionId="session_id", CodeBlock="code", ClientRequestToken="token"
+        )
+
+    @pytest.mark.parametrize("cursor_class", SYNC_SPARK_CURSOR_CLASSES)
+    @pytest.mark.parametrize(
+        "final_state",
+        [
+            AthenaCalculationExecutionStatus.STATE_CANCELED,
+            AthenaCalculationExecutionStatus.STATE_COMPLETED,
+        ],
+    )
+    def test_calculate_interrupted_while_starting(self, cursor_class, final_state):
+        cursor = _calculation_cursor(cursor_class)
+        final_execution = MagicMock(state=final_state)
+        cursor._get_calculation_execution.return_value = final_execution
+        started, release = _block_start(cursor)
+        waits, raised = _interrupt_waits(started, release)
+
+        with waits, pytest.raises(KeyboardInterrupt) as exc_info:
+            cursor._calculate(session_id="session_id", code_block="code")
+
+        assert exc_info.value is raised[0]
+        assert exc_info.value.__cause__ is None
+        cursor._connection.client.start_calculation_execution.assert_called_once()
+        cursor._cancel.assert_called_once_with("calculation_id")
+        assert cursor.calculation_id == "calculation_id"
+        assert cursor._calculation_execution is final_execution
+
+    @pytest.mark.parametrize("cursor_class", SYNC_SPARK_CURSOR_CLASSES)
+    @pytest.mark.parametrize("failing", ["start", "cancel", "wait"])
+    def test_calculate_interrupted_while_starting_failure(self, cursor_class, failing):
+        cursor = _calculation_cursor(cursor_class)
+        error = OperationalError("failed")
+        started, release = _block_start(
+            cursor,
+            response=ClientError(
+                {"Error": {"Code": "InvalidRequestException", "Message": "failed"}},
+                "StartCalculationExecution",
+            )
+            if failing == "start"
+            else None,
+        )
+        if failing == "cancel":
+            cursor._cancel.side_effect = error
+        if failing == "wait":
+            cursor._get_calculation_execution_status.side_effect = error
+        waits, raised = _interrupt_waits(started, release)
+
+        with waits, pytest.raises(KeyboardInterrupt) as exc_info:
+            cursor._calculate(session_id="session_id", code_block="code")
+
+        assert exc_info.value is raised[0]
+        assert cursor._calculation_execution is None
+        if failing == "start":
+            assert isinstance(exc_info.value.__cause__, DatabaseError)
+            cursor._cancel.assert_not_called()
+            assert cursor.calculation_id is None
+        else:
+            assert exc_info.value.__cause__ is error
+            cursor._cancel.assert_called_once_with("calculation_id")
+            assert cursor.calculation_id == "calculation_id"
+
+    @pytest.mark.parametrize("cursor_class", SYNC_SPARK_CURSOR_CLASSES)
+    def test_calculate_second_interrupt_while_starting(self, cursor_class):
+        cursor = _calculation_cursor(cursor_class)
+        started, release = _block_start(cursor)
+        waits, raised = _interrupt_waits(started, release, interrupts=2)
+
+        try:
+            with waits, pytest.raises(KeyboardInterrupt) as exc_info:
+                cursor._calculate(session_id="session_id", code_block="code")
+        finally:
+            release.set()
+
+        assert exc_info.value is raised[1]
+        assert exc_info.value.__context__ is raised[0]
+        cursor._cancel.assert_not_called()
+
+    @pytest.mark.parametrize("cursor_class", SYNC_SPARK_CURSOR_CLASSES)
+    @pytest.mark.parametrize("helper_starts", [False, True])
+    def test_calculate_interrupted_before_request_is_sent(self, cursor_class, helper_starts):
+        cursor = _calculation_cursor(cursor_class)
+        targets = []
+
+        class InterruptedThread:
+            """A thread whose start() is interrupted; the test runs its target later."""
+
+            def __init__(self, target, name, daemon):
+                targets.append(target)
+
+            def start(self):
+                raise KeyboardInterrupt
+
+        with (
+            patch("pyathena.spark.common.threading.Thread", InterruptedThread),
+            pytest.raises(KeyboardInterrupt) as exc_info,
+        ):
+            cursor._calculate(session_id="session_id", code_block="code")
+        if helper_starts:
+            # The helper thread starts running after the interrupt was handled.
+            targets[0]()
+
+        assert exc_info.value.__cause__ is None
+        cursor._connection.client.start_calculation_execution.assert_not_called()
+        cursor._cancel.assert_not_called()
+        assert cursor.calculation_id is None
+
+    @pytest.mark.parametrize("cursor_class", SYNC_SPARK_CURSOR_CLASSES)
+    def test_calculate_interrupt_without_kill_on_interrupt(self, cursor_class):
+        cursor = _calculation_cursor(cursor_class, kill_on_interrupt=False)
+        cursor._connection.client.start_calculation_execution.side_effect = KeyboardInterrupt()
+
+        with (
+            patch("pyathena.spark.common.threading.Thread") as thread,
+            pytest.raises(KeyboardInterrupt),
+        ):
+            cursor._calculate(session_id="session_id", code_block="code")
+
+        thread.assert_not_called()
+        cursor._connection.client.start_calculation_execution.assert_called_once()
+        cursor._cancel.assert_not_called()
+
+    def test_execute_interrupted_while_starting(self):
+        cursor = _calculation_cursor(SparkCursor)
+        started, release = _block_start(cursor)
+        waits, _ = _interrupt_waits(started, release)
+
+        with waits, pytest.raises(KeyboardInterrupt):
+            cursor.execute("code")
+
+        assert cursor.calculation_id == "calculation_id"
+        assert cursor.state == AthenaCalculationExecutionStatus.STATE_CANCELED
 
     @pytest.mark.parametrize("cursor_class", SPARK_CURSOR_CLASSES)
     def test_init_starts_session(self, cursor_class):

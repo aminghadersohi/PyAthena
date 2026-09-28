@@ -285,6 +285,18 @@ requests cancellation, waits until the calculation reaches a terminal state, and
 The `state` property returns that terminal state.
 If the cancellation request fails, the `KeyboardInterrupt` propagates with the error as its cause.
 
+A `KeyboardInterrupt` while `execute()` is still starting the calculation first waits for the
+[StartCalculationExecution](https://docs.aws.amazon.com/athena/latest/APIReference/API_StartCalculationExecution.html)
+request to finish, and then cancels the calculation it started in the same way.
+The `calculation_id` property returns that calculation's ID.
+A second `KeyboardInterrupt` during this wait propagates at once without cancelling the calculation.
+A cancellation request sent right after a calculation starts can occasionally have no effect, so the calculation can still end in the `COMPLETED` state.
+
+Unless `client_request_token` is passed to `execute()`, the cursor sends a generated `ClientRequestToken` with each calculation.
+A retried start request then returns the calculation that an earlier attempt started instead of starting another one.
+A token passed to `execute()` must be unique for each calculation:
+Athena returns the earlier calculation for a reused token, even when the code differs.
+
 (async-spark-cursor)=
 
 ## AsyncSparkCursor
@@ -498,3 +510,6 @@ async with await aio_connect(work_group="YOUR_SPARK_WORKGROUP",
 
 With `kill_on_interrupt` enabled, which is the default, cancelling the task while `execute()` waits for the calculation
 requests cancellation of the calculation, waits until it reaches a terminal state, and then raises `asyncio.CancelledError`.
+Cancelling the task while `execute()` is still starting the calculation first waits for the start request to finish,
+and then cancels the calculation it started in the same way.
+Cancelling the task again during this wait raises `asyncio.CancelledError` at once without cancelling the calculation.

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from typing import Any, cast
 
 from pyathena.aio.util import async_retry_api_call
@@ -133,12 +134,67 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
         description: str | None = None,
         client_request_token: str | None = None,
     ) -> str:
+        """Start a calculation execution with ``StartCalculationExecution``.
+
+        Without ``client_request_token``, a generated token is sent, so that a
+        retried request returns the calculation an earlier attempt started instead
+        of starting another one.
+
+        With ``kill_on_interrupt`` enabled, the request is shielded from task
+        cancellation. On cancellation, waits for the request to finish, requests
+        cancellation of the calculation it started, waits for a terminal state,
+        stores the calculation ID and execution on the cursor, and re-raises
+        ``asyncio.CancelledError``. Another cancellation during that wait
+        propagates at once.
+
+        Args:
+            session_id: The session ID.
+            code_block: The code to run.
+            description: The calculation description.
+            client_request_token: The idempotency token of the request.
+
+        Returns:
+            The calculation execution ID.
+
+        Raises:
+            asyncio.CancelledError: If the task is cancelled while starting the
+                calculation. A failure to start, cancel, or wait for the
+                calculation becomes its ``__cause__``.
+            DatabaseError: If the request fails.
+        """
         request = self._build_start_calculation_execution_request(
             session_id=session_id,
             code_block=code_block,
             description=description,
-            client_request_token=client_request_token,
+            client_request_token=client_request_token or str(uuid.uuid4()),
         )
+        if not self._kill_on_interrupt:
+            return await self.__start_calculation(request)
+
+        start = asyncio.ensure_future(self.__start_calculation(request))
+        try:
+            return await asyncio.shield(start)
+        except asyncio.CancelledError as cancellation:
+            _logger.warning("Query canceled by user.")
+            try:
+                self._calculation_id = await start
+                await self.__cancel_and_wait(self._calculation_id)
+            except Exception as e:
+                raise cancellation from e
+            raise
+
+    async def __start_calculation(self, request: dict[str, Any]) -> str:
+        """Send a ``StartCalculationExecution`` request.
+
+        Args:
+            request: The request parameters.
+
+        Returns:
+            The calculation execution ID.
+
+        Raises:
+            DatabaseError: If the request fails.
+        """
         try:
             response = await async_retry_api_call(
                 self._connection.client.start_calculation_execution,
@@ -146,11 +202,10 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
                 logger=_logger,
                 **request,
             )
-            calculation_id = response.get("CalculationExecutionId")
         except Exception as e:
             _logger.exception("Failed to execute calculation.")
             raise DatabaseError(*e.args) from e
-        return cast(str, calculation_id)
+        return cast(str, response.get("CalculationExecutionId"))
 
     async def __poll(self, query_id: str) -> AthenaQueryExecution | AthenaCalculationExecution:
         while True:
@@ -195,13 +250,24 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
                 raise
             _logger.warning("Query canceled by user.")
             try:
-                await self._cancel(query_id)
-                self._calculation_execution = cast(
-                    AthenaCalculationExecution, await self.__poll(query_id)
-                )
+                await self.__cancel_and_wait(query_id)
             except Exception as e:
                 raise cancellation from e
             raise
+
+    async def __cancel_and_wait(self, calculation_id: str) -> None:
+        """Request cancellation and store the calculation's terminal state.
+
+        Args:
+            calculation_id: The calculation execution ID.
+
+        Raises:
+            OperationalError: If the cancellation or a status request fails.
+        """
+        await self._cancel(calculation_id)
+        self._calculation_execution = cast(
+            AthenaCalculationExecution, await self.__poll(calculation_id)
+        )
 
     async def _cancel(self, query_id: str) -> None:  # type: ignore[override]
         request: dict[str, Any] = {"CalculationExecutionId": query_id}
