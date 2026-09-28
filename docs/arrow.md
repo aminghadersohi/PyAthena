@@ -293,10 +293,6 @@ cursor = connect(
 The timeout parameters accept float values in seconds and apply to all S3 operations performed by the cursor,
 including HeadObject and GetObject operations when retrieving query results.
 
-```{note}
-These timeout parameters require PyArrow >= 10.0.0, which added support for configuring S3FileSystem timeouts.
-```
-
 (async-arrow-cursor)=
 
 ## AsyncArrowCursor
