@@ -110,11 +110,10 @@ def recording_engine(rowcounts=None, query="", config=None, **kwargs):
 class TestAthenaDialect:
     def test_columns_from_information_schema(self):
         # Rows arrive unordered, and Athena reports a missing comment as NULL.
-        # An API cursor hands that over as None or as an empty string; a
-        # converter supplied in cursor_kwargs is applied after the one this path
-        # pins, and one written for a DataFrame cursor reports it as NaN.
+        # The API cursor this path pins hands that over as None or as an empty
+        # string.
         rows = [
-            ("4", "dt", "varchar", float("nan"), "partition key"),
+            ("4", "dt", "varchar", None, "partition key"),
             ("1", "id", "integer", "identifier", None),
             ("2", "payload", "row(a integer, b array(varchar))", None, None),
             ("3", "label", "varchar", "", ""),
@@ -187,6 +186,35 @@ class TestAthenaDialect:
         assert derived.exceptions == ("InternalServerException",)
         assert (derived.attempt, derived.multiplier, derived.max_delay) == (10, 2, 30)
         assert derived.exponential_base == 3
+
+    @pytest.mark.parametrize("configured", [False, True], ids=["connection", "cursor_kwargs"])
+    def test_column_lookup_retry_config(self, configured):
+        # The lookup cursor drops the retries the fallback answers from the
+        # connection's policy, but a retry_config in cursor_kwargs replaces it.
+        policy = RetryConfig(exceptions=("ThrottlingException", "InternalServerException"))
+        retry_configs = []
+        metadata = SimpleNamespace(columns=[], partition_keys=[])
+        cursor = SimpleNamespace(get_table_metadata=lambda table_name, **kwargs: metadata)
+
+        def open_cursor(**kwargs):
+            retry_configs.append(kwargs["retry_config"])
+            return contextlib.nullcontext(cursor)
+
+        raw_connection = SimpleNamespace(
+            cursor_kwargs={"retry_config": policy} if configured else {},
+            catalog_name="awsdatacatalog",
+            schema_name="default",
+            retry_config=policy,
+            driver_connection=SimpleNamespace(cursor=open_cursor),
+        )
+
+        AthenaDialect()._get_columns(SimpleNamespace(connection=raw_connection), "events")
+
+        (retry_config,) = retry_configs
+        if configured:
+            assert retry_config is policy
+        else:
+            assert retry_config.exceptions == ("InternalServerException",)
 
     def test_cursor_schema_applies_to_lookup_fallback_and_cache(self):
         # A schema given in cursor_kwargs is the one the cursor queries, so the

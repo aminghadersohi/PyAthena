@@ -209,6 +209,7 @@ and the contents of each file will be in sort order, but the relative order of t
 Note that specifying ORDER BY with this option enabled does not guarantee the sort order of the data.
 
 The unload option can be enabled by specifying it in the `cursor_kwargs` argument of the connect method or as an argument to the cursor method.
+An argument to the cursor method takes precedence over the same key in `cursor_kwargs`.
 
 ```python
 from pyathena import connect
