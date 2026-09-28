@@ -7,7 +7,6 @@ from decimal import Decimal
 from types import SimpleNamespace
 from urllib.parse import quote_plus
 
-import boto3
 import numpy as np
 import pandas as pd
 import pytest
@@ -44,24 +43,6 @@ requires_s3_tables = pytest.mark.skipif(
     not ENV.s3tables_catalog,
     reason="AWS_ATHENA_S3_TABLES_CATALOG is not configured",
 )
-
-
-def _delete_s3_prefix(location: str) -> None:
-    """Delete objects stored under an external table location.
-
-    Args:
-        location: The table's ``s3://bucket/prefix/`` location.
-    """
-    bucket, _, prefix = location.removeprefix("s3://").partition("/")
-    if not bucket or not prefix or prefix == "/":
-        return
-    if not prefix.endswith("/"):
-        prefix = f"{prefix}/"
-    client = boto3.client("s3")
-    for page in client.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix):
-        objects = [{"Key": item["Key"]} for item in page.get("Contents", [])]
-        if objects:
-            client.delete_objects(Bucket=bucket, Delete={"Objects": objects})
 
 
 def unique_s3tables_table_name(base: str) -> str:
@@ -3605,30 +3586,24 @@ SELECT {ENV.schema}.{table_name}.id, {ENV.schema}.{table_name}.name \n\
         ddl = str(CreateTable(table).compile(dialect=conn.dialect))
         assert "profile STRUCT<name:STRING, age:INT, address:STRUCT<city:STRING, zip:INT>>" in ddl
         assert "labels MAP<STRING, STRUCT<value:STRING, count:INT>>" in ddl
-        try:
-            table.create(bind=conn)
-            conn.execute(
-                text(
-                    f"INSERT INTO {ENV.schema}.{table_name} VALUES ("
-                    "CAST(ROW('Ada', 36, ROW('London', 12345)) AS "
-                    "ROW(name VARCHAR, age INTEGER, address ROW(city VARCHAR, zip INTEGER))), "
-                    "MAP(ARRAY['home'], ARRAY[CAST(ROW('Lovelace', 2) AS "
-                    "ROW(value VARCHAR, count INTEGER))]))"
-                )
+        table.create(bind=conn)
+        conn.execute(
+            text(
+                f"INSERT INTO {ENV.schema}.{table_name} VALUES ("
+                "CAST(ROW('Ada', 36, ROW('London', 12345)) AS "
+                "ROW(name VARCHAR, age INTEGER, address ROW(city VARCHAR, zip INTEGER))), "
+                "MAP(ARRAY['home'], ARRAY[CAST(ROW('Lovelace', 2) AS "
+                "ROW(value VARCHAR, count INTEGER))]))"
             )
-            row = conn.execute(
-                text(
-                    "SELECT profile.name, profile.age, profile.address.city, "
-                    "profile.address.zip, labels['home'].value, labels['home'].count "
-                    f"FROM {ENV.schema}.{table_name}"
-                )
-            ).one()
-            assert tuple(row) == ("Ada", 36, "London", 12345, "Lovelace", 2)
-        finally:
-            try:
-                conn.execute(text(f"DROP TABLE IF EXISTS {ENV.schema}.{table_name}"))
-            finally:
-                _delete_s3_prefix(location)
+        )
+        row = conn.execute(
+            text(
+                "SELECT profile.name, profile.age, profile.address.city, "
+                "profile.address.zip, labels['home'].value, labels['home'].count "
+                f"FROM {ENV.schema}.{table_name}"
+            )
+        ).one()
+        assert tuple(row) == ("Ada", 36, "London", 12345, "Lovelace", 2)
 
     def test_sqlalchemy_execute_with_execution_options_callback(self, engine):
         """Test callback functionality through SQLAlchemy execution_options."""

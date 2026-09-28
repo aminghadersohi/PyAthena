@@ -835,8 +835,6 @@ CREATE TABLE users (
 That includes top-level columns, fields of a STRUCT, STRUCT values inside MAP, and STRUCT values inside ARRAY.
 Integer fields, and integer MAP keys and values, use `INT` in that DDL.
 `CAST` and other SQL expressions keep `ROW(...)`, `MAP(...)`, and `ARRAY(...)`, and spell integers as `INTEGER`.
-An empty `AthenaStruct()` column remains `ROW()`.
-Code that compares compiled `CREATE TABLE` strings should expect `STRUCT<...>` and `INT` where earlier releases emitted `ROW(...)` and `INTEGER` for these column types.
 
 #### Querying STRUCT data
 

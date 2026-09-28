@@ -124,8 +124,7 @@ class AthenaTypeCompiler(GenericTypeCompiler):
         return "TINYINT"
 
     def visit_INTEGER(self, type_: types.Integer, **kw: Any) -> str:
-        # Hive DDL spells integers as INT inside ARRAY, STRUCT, and MAP columns.
-        return "INT" if kw.get("_athena_array_ddl") else "INTEGER"
+        return "INT" if kw.get("_athena_hive_ddl") else "INTEGER"
 
     def visit_SMALLINT(self, type_: types.SmallInteger, **kw: Any) -> str:
         return "SMALLINT"
@@ -203,23 +202,23 @@ class AthenaTypeCompiler(GenericTypeCompiler):
     def visit_enum(self, type_, **kw):
         return self.visit_string(type_, **kw)
 
-    def _hive_column_ddl(self, kw: dict[str, Any]) -> bool:
+    def _enable_hive_column_ddl(self, kw: dict[str, Any]) -> bool:
         """Enable Hive spelling for a CREATE TABLE column type.
 
         ``get_column_specification`` passes the column as ``type_expression``.
-        ARRAY compilation sets ``_athena_array_ddl`` so nested fields use
+        ARRAY compilation sets ``_athena_hive_ddl`` so nested fields use
         ``STRUCT<name:type>`` and ``INT``. STRUCT and MAP reuse that flag in
         column DDL. Direct compilation and CAST leave it unset.
 
         Args:
             kw: Type-compiler keyword arguments. When Hive spelling applies,
-                ``_athena_array_ddl`` is set so nested types keep it.
+                ``_athena_hive_ddl`` is set so nested types keep it.
 
         Returns:
             True when the type should use Hive DDL syntax.
         """
-        if kw.get("_athena_array_ddl") or isinstance(kw.get("type_expression"), Column):
-            kw["_athena_array_ddl"] = True
+        if kw.get("_athena_hive_ddl") or isinstance(kw.get("type_expression"), Column):
+            kw["_athena_hive_ddl"] = True
             return True
         return False
 
@@ -227,7 +226,7 @@ class AthenaTypeCompiler(GenericTypeCompiler):
         # Empty structs keep the existing ROW() rendering in every context.
         if not isinstance(type_, AthenaStruct) or not type_.fields:
             return "ROW()"
-        hive_ddl = self._hive_column_ddl(kw)
+        hive_ddl = self._enable_hive_column_ddl(kw)
         preparer = (
             AthenaDDLIdentifierPreparer(self.dialect)
             if hive_ddl
@@ -247,7 +246,7 @@ class AthenaTypeCompiler(GenericTypeCompiler):
 
     def visit_map(self, type_, **kw):
         if isinstance(type_, AthenaMap):
-            self._hive_column_ddl(kw)
+            self._enable_hive_column_ddl(kw)
             key_type_str = self.process(type_.key_type, **kw)
             value_type_str = self.process(type_.value_type, **kw)
             return f"MAP<{key_type_str}, {value_type_str}>"
@@ -258,7 +257,7 @@ class AthenaTypeCompiler(GenericTypeCompiler):
 
     def visit_array(self, type_, **kw):
         if isinstance(type_, types.ARRAY):
-            kw["_athena_array_ddl"] = True
+            kw["_athena_hive_ddl"] = True
             item_type_str = self.process(_ArrayTypeInspector.item_type(type_), **kw)
             return f"ARRAY<{item_type_str}>"
         return "ARRAY<STRING>"
