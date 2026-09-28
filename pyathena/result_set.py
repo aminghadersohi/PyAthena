@@ -803,6 +803,7 @@ class WithResultSet:
     """
 
     def __init__(self):
+        """Initialize the mixin with no query ID and no result set."""
         super().__init__()
         self._query_id: str | None = None
         self._result_set: AthenaResultSet | None = None

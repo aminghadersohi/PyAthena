@@ -52,7 +52,17 @@ def throttle_metadata_api(
 
 
 def succeeded_query_execution(query_id, query, completion_date_time, schema="this_schema"):
-    """A succeeded DML query execution, as the result cache search lists it."""
+    """Build a succeeded DML query execution, as the result cache search lists it.
+
+    Args:
+        query_id: The query execution ID.
+        query: The query string.
+        completion_date_time: The completion time.
+        schema: The database the query ran against.
+
+    Returns:
+        The query execution.
+    """
     return AthenaQueryExecution(
         {
             "QueryExecution": {

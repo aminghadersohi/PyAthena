@@ -233,7 +233,7 @@ class TestAioCursor:
                 == "query_id_awsdatacatalog"
             )
 
-    async def test_cache_search_stops_at_expired_execution(self):
+    async def test_cache_search_stops_at_expired_execution(self, caplog):
         query = "SELECT * FROM one_row"
         now = datetime.now(timezone.utc)
         cursor = AioCursor.__new__(AioCursor)
@@ -259,6 +259,8 @@ class TestAioCursor:
                 is None
             )
         list_mock.assert_awaited_once_with(None, next_token=None, max_results=50)
+        # A failed search also returns None; the expiry must stop it without an error.
+        assert "Failed to check the cache" not in caplog.text
 
     async def test_cache_search_reads_pages_up_to_cache_size(self):
         query = "SELECT * FROM one_row"
