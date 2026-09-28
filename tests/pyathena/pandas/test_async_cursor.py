@@ -17,11 +17,6 @@ from pyathena.result_set import AthenaResultSet
 from tests import ENV
 from tests.pyathena.conftest import connect
 
-# pandas 3 infers its "str" dtype for strings, which represents NULL as NaN; pandas 2 uses
-# object columns with None.
-STRING_TYPE = pd.Series(["a"]).dtype.type
-STRING_NULL = pd.Series(["a", None]).iloc[1]
-
 
 class TestAsyncPandasCursor:
     def test_binary_null_vs_empty(self, async_pandas_cursor):
@@ -592,7 +587,7 @@ class TestAsyncPandasCursor:
             # NULL and empty characters are correctly converted when the UNLOAD option is enabled.
             np.testing.assert_equal(
                 result_set.fetchall(),
-                [("", "a"), ("N/A", "a"), ("NULL", "a"), (STRING_NULL, "a")],
+                [("", "a"), ("N/A", "a"), ("NULL", "a"), (np.nan, "a")],
             )
         else:
             np.testing.assert_equal(
@@ -605,7 +600,7 @@ class TestAsyncPandasCursor:
             # NULL and empty characters are correctly converted when the UNLOAD option is enabled.
             np.testing.assert_equal(
                 result_set.fetchall(),
-                [("", "a"), ("N/A", "a"), ("NULL", "a"), (STRING_NULL, "a")],
+                [("", "a"), ("N/A", "a"), ("NULL", "a"), (np.nan, "a")],
             )
         else:
             assert result_set.fetchall() == [

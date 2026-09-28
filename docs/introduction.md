@@ -33,8 +33,8 @@ Extra packages:
 |---------------|-----------------------------------------|----------|
 | SQLAlchemy    | `pip install PyAthena[SQLAlchemy]`      | >=2.0.0  |
 | AioSQLAlchemy | `pip install PyAthena[AioSQLAlchemy]`   | >=2.0.0  |
-| Pandas        | `pip install PyAthena[Pandas]`          | >=1.3.0  |
-| Arrow         | `pip install PyAthena[Arrow]`           | >=10.0.0 |
+| Pandas        | `pip install PyAthena[Pandas]`          | >=3.0.0  |
+| Arrow         | `pip install PyAthena[Arrow]`           | >=22.0.0 |
 | Polars        | `pip install PyAthena[Polars]`          | >=1.39.0 |
 
 (features)=
