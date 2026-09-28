@@ -15,7 +15,6 @@ from sqlalchemy.sql.schema import Column
 from sqlalchemy.sql.type_api import TypeEngine
 from sqlalchemy.sql.visitors import InternalTraversal
 
-from pyathena.converter import _parse_datetime
 from pyathena.formatter import _ComplexParameter
 from pyathena.sqlalchemy.map import AthenaMap
 from pyathena.sqlalchemy.struct import AthenaStruct
@@ -165,23 +164,6 @@ class _ArrayJSONProjection(ColumnElement[Any]):
         self.element = element
         self.type = element.type
         self.array_type = type_
-
-
-def _decode_datetime(value: str) -> datetime:
-    """Decode an ARRAY element as a datetime.
-
-    Args:
-        value: The element as ISO 8601 text, or as Athena TIMESTAMP text of any
-            precision.
-
-    Returns:
-        The datetime. Fractional digits beyond microseconds are truncated.
-    """
-    try:
-        return datetime.fromisoformat(value)
-    except ValueError:
-        # Python 3.10 accepts only 3 or 6 fractional digits.
-        return _parse_datetime(value)
 
 
 class _ArrayTypeInspector:
@@ -414,7 +396,7 @@ class _ArrayValueProcessor:
         if isinstance(type_, types.Numeric):
             return Decimal(value) if type_.asdecimal else float(value)
         if isinstance(type_, (types.DateTime, AthenaTimestamp)):
-            return value if isinstance(value, datetime) else _decode_datetime(value)
+            return value if isinstance(value, datetime) else datetime.fromisoformat(value)
         if isinstance(type_, (types.Date, AthenaDate)):
             return value if isinstance(value, date) else date.fromisoformat(value)
         if isinstance(type_, (types.LargeBinary, types.BINARY, types.VARBINARY)):

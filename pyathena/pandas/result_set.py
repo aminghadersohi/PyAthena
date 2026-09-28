@@ -392,7 +392,7 @@ class AthenaPandasResultSet(AthenaResultSet):
             try:
                 module = importlib.import_module(engine)
                 return module.__name__
-            except ImportError as e:  # noqa: PERF203
+            except ImportError as e:
                 error_msgs += f"\n - {e!s}"
 
         available_engines = ", ".join(f"'{e}'" for e in engine_candidates)

@@ -4,7 +4,7 @@
 # https://www.sphinx-doc.org/en/master/usage/configuration.html
 import re
 import subprocess
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 
 def get_version():
@@ -139,7 +139,7 @@ def setup(app):
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
 project = "PyAthena"
-copyright = f"2017-{datetime.now(timezone.utc).year}, The PyAthena authors"
+copyright = f"2017-{datetime.now(UTC).year}, The PyAthena authors"
 author = "The PyAthena authors"
 # Version will be set dynamically in setup() function
 version = ""

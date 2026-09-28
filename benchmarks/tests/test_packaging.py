@@ -29,7 +29,7 @@ def test_main_distributions_exclude_benchmark_code_and_dependencies():
             archive.read(next(n for n in names if n.endswith("/METADATA"))).decode()
         )
         assert metadata["Name"].lower() == "pyathena"
-        assert metadata["Requires-Python"] == ">=3.10"
+        assert metadata["Requires-Python"] == ">=3.11"
         requirements = "\n".join(metadata.get_all("Requires-Dist", []))
         assert "awswrangler" not in requirements
         assert "psutil" not in requirements

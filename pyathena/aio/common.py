@@ -4,7 +4,7 @@ import asyncio
 import logging
 import sys
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any, TypeVar, cast
 
 from botocore.exceptions import BotoCoreError, ClientError
@@ -240,9 +240,9 @@ class AioBaseCursor(BaseCursor):
         if cache_size == 0 and cache_expiration_time > 0:
             cache_size = sys.maxsize
         if cache_expiration_time > 0:
-            expiration_time = datetime.now(timezone.utc) - timedelta(seconds=cache_expiration_time)
+            expiration_time = datetime.now(UTC) - timedelta(seconds=cache_expiration_time)
         else:
-            expiration_time = datetime.now(timezone.utc)
+            expiration_time = datetime.now(UTC)
         try:
             next_token = None
             while cache_size > 0:
@@ -264,8 +264,7 @@ class AioBaseCursor(BaseCursor):
                     if (
                         cache_expiration_time > 0
                         and execution.completion_date_time
-                        and execution.completion_date_time.astimezone(timezone.utc)
-                        < expiration_time
+                        and execution.completion_date_time.astimezone(UTC) < expiration_time
                     ):
                         next_token = None
                         break

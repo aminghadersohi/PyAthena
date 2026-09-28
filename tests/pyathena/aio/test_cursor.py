@@ -1,7 +1,7 @@
 import asyncio
 import re
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -171,7 +171,7 @@ class TestAioCursor:
                         "QueryExecutionContext": {"Database": schema},
                         "Status": {
                             "State": AthenaQueryExecution.STATE_SUCCEEDED,
-                            "CompletionDateTime": datetime.now(timezone.utc),
+                            "CompletionDateTime": datetime.now(UTC),
                         },
                     }
                 }
@@ -208,7 +208,7 @@ class TestAioCursor:
                         "QueryExecutionContext": {"Database": schema, "Catalog": catalog},
                         "Status": {
                             "State": AthenaQueryExecution.STATE_SUCCEEDED,
-                            "CompletionDateTime": datetime.now(timezone.utc),
+                            "CompletionDateTime": datetime.now(UTC),
                         },
                     }
                 }
