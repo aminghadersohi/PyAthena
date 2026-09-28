@@ -7,6 +7,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 from urllib.parse import quote_plus
 
+import boto3
 import numpy as np
 import pandas as pd
 import pytest
@@ -43,6 +44,24 @@ requires_s3_tables = pytest.mark.skipif(
     not ENV.s3tables_catalog,
     reason="AWS_ATHENA_S3_TABLES_CATALOG is not configured",
 )
+
+
+def _delete_s3_prefix(location: str) -> None:
+    """Delete objects stored under an external table location.
+
+    Args:
+        location: The table's ``s3://bucket/prefix/`` location.
+    """
+    bucket, _, prefix = location.removeprefix("s3://").partition("/")
+    if not bucket or not prefix or prefix == "/":
+        return
+    if not prefix.endswith("/"):
+        prefix = f"{prefix}/"
+    client = boto3.client("s3")
+    for page in client.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix):
+        objects = [{"Key": item["Key"]} for item in page.get("Contents", [])]
+        if objects:
+            client.delete_objects(Bucket=bucket, Delete={"Objects": objects})
 
 
 def unique_s3tables_table_name(base: str) -> str:
@@ -3468,8 +3487,8 @@ SELECT {ENV.schema}.{table_name}.id, {ENV.schema}.{table_name}.name \n\
 
         # Verify MAP types are correctly compiled
         assert "attributes MAP<STRING, STRING>" in ddl_string
-        assert "metrics MAP<STRING, INTEGER>" in ddl_string
-        assert "complex_map MAP<STRING, ROW(value STRING, count INTEGER)>" in ddl_string
+        assert "metrics MAP<STRING, INT>" in ddl_string
+        assert "complex_map MAP<STRING, STRUCT<value:STRING, count:INT>>" in ddl_string
         assert "nested_map MAP<STRING, ARRAY<STRING>>" in ddl_string
 
     def test_create_table_with_struct_types(self, engine):
@@ -3511,12 +3530,12 @@ SELECT {ENV.schema}.{table_name}.id, {ENV.schema}.{table_name}.name \n\
         ddl_string = str(create_ddl)
 
         # Verify STRUCT types are correctly compiled
-        assert "user_info ROW(name STRING, age INTEGER, email STRING)" in ddl_string
+        assert "user_info STRUCT<name:STRING, age:INT, email:STRING>" in ddl_string
         assert (
-            "nested_struct ROW(personal ROW(first_name STRING, last_name STRING), "
-            "preferences MAP<STRING, STRING>)" in ddl_string
+            "nested_struct STRUCT<personal:STRUCT<first_name:STRING, last_name:STRING>, "
+            "preferences:MAP<STRING, STRING>>" in ddl_string
         )
-        assert "struct_with_array ROW(tags ARRAY<STRING>, scores ARRAY<INT>)" in ddl_string
+        assert "struct_with_array STRUCT<tags:ARRAY<STRING>, scores:ARRAY<INT>>" in ddl_string
 
     def test_create_table_with_complex_nested_types(self, engine):
         """Test DDL compilation for complex nested combinations of ARRAY, MAP, and STRUCT."""
@@ -3553,6 +3572,63 @@ SELECT {ENV.schema}.{table_name}.id, {ENV.schema}.{table_name}.name \n\
             "tags:ARRAY<STRING>>>>"
         )
         assert expected_type in ddl_string
+
+    def test_external_parquet_struct_columns_round_trip(self, engine):
+        """Create a Parquet table of top-level and MAP-nested STRUCTs and read the fields back."""
+        _, conn = engine
+        table_name = "test_external_parquet_struct_columns"
+        location = f"{ENV.s3_staging_dir}{ENV.schema}/{table_name}/"
+        table = Table(
+            table_name,
+            MetaData(schema=ENV.schema),
+            Column(
+                "profile",
+                AthenaStruct(
+                    ("name", types.String),
+                    ("age", types.Integer),
+                    (
+                        "address",
+                        AthenaStruct(("city", types.String), ("zip", types.Integer)),
+                    ),
+                ),
+            ),
+            Column(
+                "labels",
+                AthenaMap(
+                    types.String,
+                    AthenaStruct(("value", types.String), ("count", types.Integer)),
+                ),
+            ),
+            awsathena_location=location,
+            awsathena_file_format="PARQUET",
+        )
+        ddl = str(CreateTable(table).compile(dialect=conn.dialect))
+        assert "profile STRUCT<name:STRING, age:INT, address:STRUCT<city:STRING, zip:INT>>" in ddl
+        assert "labels MAP<STRING, STRUCT<value:STRING, count:INT>>" in ddl
+        try:
+            table.create(bind=conn)
+            conn.execute(
+                text(
+                    f"INSERT INTO {ENV.schema}.{table_name} VALUES ("
+                    "CAST(ROW('Ada', 36, ROW('London', 12345)) AS "
+                    "ROW(name VARCHAR, age INTEGER, address ROW(city VARCHAR, zip INTEGER))), "
+                    "MAP(ARRAY['home'], ARRAY[CAST(ROW('Lovelace', 2) AS "
+                    "ROW(value VARCHAR, count INTEGER))]))"
+                )
+            )
+            row = conn.execute(
+                text(
+                    "SELECT profile.name, profile.age, profile.address.city, "
+                    "profile.address.zip, labels['home'].value, labels['home'].count "
+                    f"FROM {ENV.schema}.{table_name}"
+                )
+            ).one()
+            assert tuple(row) == ("Ada", 36, "London", 12345, "Lovelace", 2)
+        finally:
+            try:
+                conn.execute(text(f"DROP TABLE IF EXISTS {ENV.schema}.{table_name}"))
+            finally:
+                _delete_s3_prefix(location)
 
     def test_sqlalchemy_execute_with_execution_options_callback(self, engine):
         """Test callback functionality through SQLAlchemy execution_options."""
