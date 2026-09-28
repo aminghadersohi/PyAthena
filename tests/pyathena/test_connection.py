@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from pyathena.connection import Connection
+from pyathena.converter import DefaultTypeConverter
 from pyathena.cursor import Cursor
 from pyathena.util import RetryConfig
 
@@ -34,6 +35,7 @@ class TestConnection:
     @pytest.mark.parametrize(
         ("key", "configured", "explicit"),
         [
+            ("converter", DefaultTypeConverter(), DefaultTypeConverter()),
             ("kill_on_interrupt", False, True),
             ("retry_config", RetryConfig(attempt=1), RetryConfig(attempt=2)),
             ("schema_name", "configured", "explicit"),
