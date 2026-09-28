@@ -63,6 +63,7 @@ class AioBaseCursor(BaseCursor):
             The query execution ID.
 
         Raises:
+            ProgrammingError: If the formatter rejects the query or its parameters.
             DatabaseError: If the ``StartQueryExecution`` request fails.
         """
         # The individual keyword arguments are retained for backward compatibility
@@ -620,9 +621,9 @@ class WithAsyncFetch(AioBaseCursor, WithResultSet, CursorIterator):
     """Mixin providing async lifecycle and the async protocol for SQL cursors.
 
     Adds ``close``, async ``executemany`` and ``cancel``, async iteration, and
-    the async context manager protocol to the properties and default sync
-    fetch methods of ``WithResultSet``. Cursors whose result sets fetch lazily
-    override the fetch methods with async versions.
+    the async context manager protocol to the properties and sync fetch
+    methods of ``WithResultSet``. Subclasses override the fetch methods with
+    async versions.
 
     Subclasses override ``execute()`` and optionally ``__init__`` and
     format-specific helpers.

@@ -798,8 +798,8 @@ class WithResultSet:
     """Mixin providing a SQL cursor's result set, its properties, and default fetch.
 
     Shared by the sync (``WithFetch``) and asyncio (``WithAsyncFetch``) cursors.
-    The default fetch methods suit result sets that load all data eagerly in
-    ``__init__``.
+    The fetch methods call the result set synchronously; the asyncio cursors
+    override them with async versions.
     """
 
     def __init__(self):

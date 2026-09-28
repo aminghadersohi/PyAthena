@@ -1103,6 +1103,9 @@ class BaseCursor(metaclass=ABCMeta):
 
         Returns:
             Tuple of (formatted_query, request).
+
+        Raises:
+            ProgrammingError: If the formatter rejects the query or its parameters.
         """
         query, execution_parameters = self._prepare_query(operation, parameters, options.paramstyle)
         request = self._build_start_query_execution_request(
@@ -1149,6 +1152,7 @@ class BaseCursor(metaclass=ABCMeta):
             The query execution ID.
 
         Raises:
+            ProgrammingError: If the formatter rejects the query or its parameters.
             DatabaseError: If the ``StartQueryExecution`` request fails.
         """
         # The individual keyword arguments are retained for backward compatibility
