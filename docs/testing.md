@@ -35,7 +35,7 @@ just docs lint
 just docs build
 ```
 
-`just docs build` builds documentation from the configured Git refs with sphinx-multiversion.
+`just docs build` builds `master`, the latest patch release of the newest minor versions (`SMV_MINOR_VERSIONS` in `docs/conf.py`), and the latest release of the previous major version if that tag contains `docs/conf.py`, with sphinx-multiversion.
 To check the working tree, including uncommitted documentation changes, also run:
 
 ```bash
