@@ -2,10 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import sys
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timedelta, timezone
-from typing import Any, TypeVar, cast
+from typing import Any, TypeVar
 
 from botocore.exceptions import BotoCoreError, ClientError
 
@@ -15,7 +13,7 @@ from pyathena.error import DatabaseError, OperationalError, ProgrammingError
 from pyathena.glue import GlueMetadataClient
 from pyathena.model import AthenaDatabase, AthenaQueryExecution, AthenaTableMetadata
 from pyathena.options import ExecuteOptions
-from pyathena.result_set import AthenaResultSet, WithResultSet
+from pyathena.result_set import WithResultSet
 from pyathena.util import _is_throttling_error
 
 _logger = logging.getLogger(__name__)
@@ -44,6 +42,29 @@ class AioBaseCursor(BaseCursor):
         paramstyle: str | None = None,
         options: ExecuteOptions | None = None,
     ) -> str:
+        """Start a query execution, or find a previous one to reuse.
+
+        The individual keyword arguments override the ``options`` field of the
+        same name unless None.
+
+        Args:
+            operation: SQL query string.
+            parameters: Query parameters.
+            work_group: Athena work group.
+            s3_staging_dir: S3 location for query results.
+            cache_size: Number of recent executions to search for a reusable result.
+            cache_expiration_time: Maximum age of a reusable result in seconds.
+            result_reuse_enable: Whether to enable Athena result reuse.
+            result_reuse_minutes: Maximum age of an Athena-reused result in minutes.
+            paramstyle: Parameter style ('qmark' or 'pyformat').
+            options: The execution options.
+
+        Returns:
+            The query execution ID.
+
+        Raises:
+            DatabaseError: If the ``StartQueryExecution`` request fails.
+        """
         # The individual keyword arguments are retained for backward compatibility
         # with external callers that predate ExecuteOptions, mirroring
         # BaseCursor._execute().
@@ -57,16 +78,7 @@ class AioBaseCursor(BaseCursor):
             result_reuse_minutes=result_reuse_minutes,
             paramstyle=paramstyle,
         )
-        query, execution_parameters = self._prepare_query(operation, parameters, options.paramstyle)
-
-        request = self._build_start_query_execution_request(
-            query=query,
-            work_group=options.work_group,
-            s3_staging_dir=options.s3_staging_dir,
-            result_reuse_enable=options.result_reuse_enable,
-            result_reuse_minutes=options.result_reuse_minutes,
-            execution_parameters=execution_parameters,
-        )
+        query, request = self._build_execute_request(operation, parameters, options)
         query_id = await self._find_previous_query_id(
             query,
             options.work_group,
@@ -236,13 +248,23 @@ class AioBaseCursor(BaseCursor):
         cache_size: int = 0,
         cache_expiration_time: int = 0,
     ) -> str | None:
+        """Find a previous execution of a query whose result can be reused.
+
+        Searches the work group's recent executions page by page. A failed
+        search is logged and treated as a cache miss.
+
+        Args:
+            query: The query string.
+            work_group: The work group to search, or None for the cursor's.
+            cache_size: The number of recent executions to search, or 0.
+            cache_expiration_time: The maximum age of a reused result in
+                seconds, or 0 for no limit.
+
+        Returns:
+            The query ID of the latest reusable execution, or None.
+        """
+        cache_size, expiration_time = self._cache_search_limits(cache_size, cache_expiration_time)
         query_id = None
-        if cache_size == 0 and cache_expiration_time > 0:
-            cache_size = sys.maxsize
-        if cache_expiration_time > 0:
-            expiration_time = datetime.now(timezone.utc) - timedelta(seconds=cache_expiration_time)
-        else:
-            expiration_time = datetime.now(timezone.utc)
         try:
             next_token = None
             while cache_size > 0:
@@ -251,32 +273,10 @@ class AioBaseCursor(BaseCursor):
                 next_token, query_executions = await self._list_query_executions(
                     work_group, next_token=next_token, max_results=max_results
                 )
-                for execution in sorted(
-                    (
-                        e
-                        for e in query_executions
-                        if e.state == AthenaQueryExecution.STATE_SUCCEEDED
-                        and e.statement_type == AthenaQueryExecution.STATEMENT_TYPE_DML
-                    ),
-                    key=lambda e: e.completion_date_time,  # type: ignore[arg-type, return-value]
-                    reverse=True,
-                ):
-                    if (
-                        cache_expiration_time > 0
-                        and execution.completion_date_time
-                        and execution.completion_date_time.astimezone(timezone.utc)
-                        < expiration_time
-                    ):
-                        next_token = None
-                        break
-                    if (
-                        execution.query == query
-                        and execution.database == self._schema_name
-                        and (execution.catalog or "").lower() == (self._catalog_name or "").lower()
-                    ):
-                        query_id = execution.query_id
-                        break
-                if query_id or next_token is None:
+                query_id, expired = self._match_previous_query(
+                    query, query_executions, expiration_time
+                )
+                if query_id or expired or next_token is None:
                     break
         except Exception:
             _logger.warning("Failed to check the cache. Moving on without cache.", exc_info=True)
@@ -616,56 +616,17 @@ class AioBaseCursor(BaseCursor):
         )
 
 
-class WithAsyncFetch(AioBaseCursor, CursorIterator, WithResultSet):
-    """Mixin providing shared fetch, lifecycle, and async protocol for SQL cursors.
+class WithAsyncFetch(AioBaseCursor, WithResultSet, CursorIterator):
+    """Mixin providing async lifecycle and the async protocol for SQL cursors.
 
-    Provides properties (``arraysize``, ``result_set``, ``query_id``,
-    ``rownumber``, ``rowcount``), lifecycle methods (``close``, ``executemany``,
-    ``cancel``), default sync fetch (for cursors whose result sets load all
-    data eagerly in ``__init__``), and the async iteration protocol.
+    Adds ``close``, async ``executemany`` and ``cancel``, async iteration, and
+    the async context manager protocol to the properties and default sync
+    fetch methods of ``WithResultSet``. Cursors whose result sets fetch lazily
+    override the fetch methods with async versions.
 
     Subclasses override ``execute()`` and optionally ``__init__`` and
     format-specific helpers.
     """
-
-    def __init__(self, **kwargs) -> None:
-        super().__init__(**kwargs)
-        self._query_id: str | None = None
-        self._result_set: AthenaResultSet | None = None
-
-    @property
-    def arraysize(self) -> int:
-        return self._arraysize
-
-    @arraysize.setter
-    def arraysize(self, value: int) -> None:
-        if value <= 0:
-            raise ProgrammingError("arraysize must be a positive integer value.")
-        self._arraysize = value
-
-    @property  # type: ignore[override]
-    def result_set(self) -> AthenaResultSet | None:
-        return self._result_set
-
-    @result_set.setter
-    def result_set(self, val) -> None:
-        self._result_set = val
-
-    @property
-    def query_id(self) -> str | None:
-        return self._query_id
-
-    @query_id.setter
-    def query_id(self, val) -> None:
-        self._query_id = val
-
-    @property
-    def rownumber(self) -> int | None:
-        return self.result_set.rownumber if self.result_set else None
-
-    @property
-    def rowcount(self) -> int:
-        return self.result_set.rowcount if self.result_set else self._rowcount
 
     def close(self) -> None:
         """Close the cursor and release associated resources."""
@@ -719,57 +680,6 @@ class WithAsyncFetch(AioBaseCursor, CursorIterator, WithResultSet):
         if not self.query_id:
             raise ProgrammingError("QueryExecutionId is none or empty.")
         await self._cancel(self.query_id)
-
-    def fetchone(
-        self,
-    ) -> tuple[Any | None, ...] | dict[Any, Any | None] | None:
-        """Fetch the next row of the result set.
-
-        Returns:
-            A tuple representing the next row, or None if no more rows.
-
-        Raises:
-            ProgrammingError: If no result set is available.
-        """
-        if not self.has_result_set:
-            raise ProgrammingError("No result set.")
-        result_set = cast(AthenaResultSet, self.result_set)
-        return result_set.fetchone()
-
-    def fetchmany(
-        self, size: int | None = None
-    ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
-        """Fetch multiple rows from the result set.
-
-        Args:
-            size: Maximum number of rows to fetch. Defaults to arraysize.
-
-        Returns:
-            List of tuples representing the fetched rows.
-
-        Raises:
-            ProgrammingError: If no result set is available.
-        """
-        if not self.has_result_set:
-            raise ProgrammingError("No result set.")
-        result_set = cast(AthenaResultSet, self.result_set)
-        return result_set.fetchmany(size)
-
-    def fetchall(
-        self,
-    ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
-        """Fetch all remaining rows from the result set.
-
-        Returns:
-            List of tuples representing all remaining rows.
-
-        Raises:
-            ProgrammingError: If no result set is available.
-        """
-        if not self.has_result_set:
-            raise ProgrammingError("No result set.")
-        result_set = cast(AthenaResultSet, self.result_set)
-        return result_set.fetchall()
 
     def __aiter__(self):
         return self
