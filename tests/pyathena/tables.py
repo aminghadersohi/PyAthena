@@ -15,7 +15,7 @@ import io
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -68,7 +68,7 @@ class Table:
     name: str
     columns: tuple[Column, ...]
     rows: tuple[tuple[Any, ...], ...] = ()
-    storage: str = "parquet"
+    storage: Literal["parquet", "text"] = "parquet"
     partitions: tuple[Column, ...] = ()
     comment: str | None = None
     tblproperties: tuple[tuple[str, str], ...] = ()
