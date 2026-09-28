@@ -244,11 +244,14 @@ class TestAioCursor:
             succeeded_query_execution("other", "SELECT 1", now),
         ]
 
+        # A page read after the expired execution would return this match.
+        next_page = (None, [succeeded_query_execution("next_page", query, now)])
+
         with patch.object(
             AioCursor,
             "_list_query_executions",
             new_callable=AsyncMock,
-            return_value=("next_token", page),
+            side_effect=[("next_token", page), next_page],
         ) as list_mock:
             # Without cache_size, cache_expiration_time alone bounds the search.
             assert (
