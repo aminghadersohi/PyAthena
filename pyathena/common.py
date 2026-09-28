@@ -862,27 +862,54 @@ class BaseCursor(metaclass=ABCMeta):
                 return next_token, []
             return next_token, self._batch_get_query_execution(query_ids)
 
-    def __poll(self, query_id: str) -> AthenaQueryExecution | AthenaCalculationExecution:
+    def _poll_until_terminal(
+        self, query_id: str
+    ) -> AthenaQueryExecution | AthenaCalculationExecution:
+        """Poll a query execution until it reaches a terminal state.
+
+        Calls ``on_poll`` with every status and sleeps ``poll_interval`` seconds
+        between requests.
+
+        Args:
+            query_id: The query execution ID.
+
+        Returns:
+            The query execution in a terminal state.
+
+        Raises:
+            OperationalError: If a status request fails.
+        """
         while True:
             query_execution = self._get_query_execution(query_id)
             if self._on_poll:
                 self._on_poll(query_execution)
-            if query_execution.state in [
-                AthenaQueryExecution.STATE_SUCCEEDED,
-                AthenaQueryExecution.STATE_FAILED,
-                AthenaQueryExecution.STATE_CANCELLED,
-            ]:
+            if query_execution.state in AthenaQueryExecution.TERMINAL_STATES:
                 return query_execution
             time.sleep(self._poll_interval)
 
     def _poll(self, query_id: str) -> AthenaQueryExecution | AthenaCalculationExecution:
+        """Wait for a query execution to finish.
+
+        On ``KeyboardInterrupt`` with ``kill_on_interrupt`` enabled, stops the query
+        and returns its final execution instead of re-raising.
+
+        Args:
+            query_id: The query execution ID.
+
+        Returns:
+            The query execution in a terminal state.
+
+        Raises:
+            KeyboardInterrupt: If interrupted and ``kill_on_interrupt`` is disabled.
+            OperationalError: If a status or stop request fails.
+        """
         try:
-            query_execution = self.__poll(query_id)
+            query_execution = self._poll_until_terminal(query_id)
         except KeyboardInterrupt as e:
             if self._kill_on_interrupt:
                 _logger.warning("Query canceled by user.")
                 self._cancel(query_id)
-                query_execution = self.__poll(query_id)
+                query_execution = self._poll_until_terminal(query_id)
             else:
                 raise e
         return query_execution

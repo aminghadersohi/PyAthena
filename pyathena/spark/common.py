@@ -272,7 +272,7 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
             # The caller receives no cursor to close, so the session is released here.
             with contextlib.suppress(OperationalError):
                 # Already logged with the session ID; the original error takes precedence.
-                self.__terminate_session(session_id)
+                self._terminate_session_by_id(session_id)
             raise
         return session_id
 
@@ -282,13 +282,14 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
         Raises:
             OperationalError: If the request fails.
         """
-        self.__terminate_session(self._session_id)
+        self._terminate_session_by_id(self._session_id)
 
-    def __terminate_session(self, session_id: str) -> None:
+    def _terminate_session_by_id(self, session_id: str) -> None:
         """Terminate a Spark session with ``TerminateSession``.
 
         Session startup calls this synchronously in every cursor variant,
-        including those that override ``_terminate_session`` with a coroutine.
+        including those that override ``_terminate_session`` with a coroutine,
+        so subclasses must not override this method with a coroutine.
 
         Args:
             session_id: The session ID.
@@ -308,16 +309,28 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
             _logger.exception(f"Failed to terminate session: {session_id}.")
             raise OperationalError(*e.args) from e
 
-    def __poll(self, query_id: str) -> AthenaQueryExecution | AthenaCalculationExecution:
+    def _poll_until_terminal(
+        self, query_id: str
+    ) -> AthenaQueryExecution | AthenaCalculationExecution:
+        """Poll a calculation execution until it reaches a terminal state.
+
+        Calls ``on_poll`` with every status and sleeps ``poll_interval`` seconds
+        between requests.
+
+        Args:
+            query_id: The calculation execution ID.
+
+        Returns:
+            The calculation execution in a terminal state.
+
+        Raises:
+            OperationalError: If a status request fails.
+        """
         while True:
             calculation_status = self._get_calculation_execution_status(query_id)
             if self._on_poll:
                 self._on_poll(calculation_status)
-            if calculation_status.state in [
-                AthenaCalculationExecutionStatus.STATE_COMPLETED,
-                AthenaCalculationExecutionStatus.STATE_FAILED,
-                AthenaCalculationExecutionStatus.STATE_CANCELED,
-            ]:
+            if calculation_status.state in AthenaCalculationExecutionStatus.TERMINAL_STATES:
                 return self._get_calculation_execution(query_id)
             time.sleep(self._poll_interval)
 
@@ -342,18 +355,18 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
             OperationalError: If a status request fails.
         """
         try:
-            return self.__poll(query_id)
+            return self._poll_until_terminal(query_id)
         except KeyboardInterrupt as interrupt:
             if not self._kill_on_interrupt:
                 raise
             _logger.warning("Query canceled by user.")
             try:
-                self.__cancel_and_wait(query_id)
+                self._cancel_and_wait(query_id)
             except Exception as e:
                 raise interrupt from e
             raise
 
-    def __cancel_and_wait(self, calculation_id: str) -> None:
+    def _cancel_and_wait(self, calculation_id: str) -> None:
         """Request cancellation and store the calculation's terminal state.
 
         Args:
@@ -363,7 +376,9 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
             OperationalError: If the cancellation or a status request fails.
         """
         self._cancel(calculation_id)
-        self._calculation_execution = cast(AthenaCalculationExecution, self.__poll(calculation_id))
+        self._calculation_execution = cast(
+            AthenaCalculationExecution, self._poll_until_terminal(calculation_id)
+        )
 
     def _calculate(
         self,
@@ -409,7 +424,7 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
             client_request_token=client_request_token or str(uuid.uuid4()),
         )
         if not self._kill_on_interrupt:
-            return self.__start_calculation(request)
+            return self._start_calculation_execution(request)
 
         future: Future[str] = Future()
 
@@ -418,26 +433,26 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
             if not future.set_running_or_notify_cancel():
                 return
             try:
-                future.set_result(self.__start_calculation(request))
+                future.set_result(self._start_calculation_execution(request))
             except BaseException as e:
                 future.set_exception(e)
 
         try:
             threading.Thread(target=start, name="pyathena-spark-start", daemon=True).start()
-            return self.__wait_for_start(future)
+            return self._wait_for_calculation_start(future)
         except KeyboardInterrupt as interrupt:
             if future.cancel():
                 # The helper has not begun the request and never will.
                 raise
             _logger.warning("Query canceled by user.")
             try:
-                self._calculation_id = self.__wait_for_start(future)
-                self.__cancel_and_wait(self._calculation_id)
+                self._calculation_id = self._wait_for_calculation_start(future)
+                self._cancel_and_wait(self._calculation_id)
             except Exception as e:
                 raise interrupt from e
             raise
 
-    def __start_calculation(self, request: dict[str, Any]) -> str:
+    def _start_calculation_execution(self, request: dict[str, Any]) -> str:
         """Send a ``StartCalculationExecution`` request.
 
         Args:
@@ -462,7 +477,7 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
         return cast(str, response.get("CalculationExecutionId"))
 
     @staticmethod
-    def __wait_for_start(future: Future[str]) -> str:
+    def _wait_for_calculation_start(future: Future[str]) -> str:
         """Wait for the start request on a helper thread to finish.
 
         Args:

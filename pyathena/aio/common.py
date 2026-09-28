@@ -113,27 +113,52 @@ class AioBaseCursor(BaseCursor):
         else:
             return AthenaQueryExecution(response)
 
-    async def __poll(self, query_id: str) -> AthenaQueryExecution:
+    async def _poll_until_terminal(self, query_id: str) -> AthenaQueryExecution:  # type: ignore[override]
+        """Poll a query execution until it reaches a terminal state.
+
+        Calls ``on_poll`` with every status and awaits ``poll_interval`` seconds
+        between requests.
+
+        Args:
+            query_id: The query execution ID.
+
+        Returns:
+            The query execution in a terminal state.
+
+        Raises:
+            OperationalError: If a status request fails.
+        """
         while True:
             query_execution = await self._get_query_execution(query_id)
             if self._on_poll:
                 self._on_poll(query_execution)
-            if query_execution.state in [
-                AthenaQueryExecution.STATE_SUCCEEDED,
-                AthenaQueryExecution.STATE_FAILED,
-                AthenaQueryExecution.STATE_CANCELLED,
-            ]:
+            if query_execution.state in AthenaQueryExecution.TERMINAL_STATES:
                 return query_execution
             await asyncio.sleep(self._poll_interval)
 
     async def _poll(self, query_id: str) -> AthenaQueryExecution:  # type: ignore[override]
+        """Wait for a query execution to finish.
+
+        On ``asyncio.CancelledError`` with ``kill_on_interrupt`` enabled, stops the
+        query and returns its final execution instead of re-raising.
+
+        Args:
+            query_id: The query execution ID.
+
+        Returns:
+            The query execution in a terminal state.
+
+        Raises:
+            asyncio.CancelledError: If cancelled and ``kill_on_interrupt`` is disabled.
+            OperationalError: If a status or stop request fails.
+        """
         try:
-            query_execution = await self.__poll(query_id)
+            query_execution = await self._poll_until_terminal(query_id)
         except asyncio.CancelledError:
             if self._kill_on_interrupt:
                 _logger.warning("Query canceled by user.")
                 await self._cancel(query_id)
-                query_execution = await self.__poll(query_id)
+                query_execution = await self._poll_until_terminal(query_id)
             else:
                 raise
         return query_execution

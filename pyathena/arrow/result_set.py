@@ -110,7 +110,7 @@ class AthenaArrowResultSet(AthenaResultSet):
         self._connect_timeout = connect_timeout
         self._request_timeout = request_timeout
         self._kwargs = kwargs
-        self._fs = self.__s3_file_system()
+        self._fs = self._create_s3_file_system()
         if self.state == AthenaQueryExecution.STATE_SUCCEEDED and self.output_location:
             self._table = self._as_arrow()
         elif self.state == AthenaQueryExecution.STATE_SUCCEEDED:
@@ -121,7 +121,12 @@ class AthenaArrowResultSet(AthenaResultSet):
             self._table = pa.Table.from_pydict({})
         self._batches = iter(self._table.to_batches(arraysize))
 
-    def __s3_file_system(self):
+    def _create_s3_file_system(self):
+        """Create a pyarrow ``S3FileSystem`` from the connection settings.
+
+        Returns:
+            The pyarrow S3 filesystem for reading the query results.
+        """
         from pyarrow import fs
 
         connection = self.connection
