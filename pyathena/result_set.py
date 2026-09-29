@@ -860,11 +860,14 @@ class WithResultSet(BaseCursor, CursorIterator):
 
     @property
     def query_id(self) -> str | None:
-        """The query execution ID of the last started query.
+        """The query execution ID of the last execution.
+
+        With ``cache_size`` or ``cache_expiration_time``, this can be the ID of
+        a previous execution whose result is reused.
 
         Returns:
-            The query execution ID, or None if no query has started since the
-            last reset.
+            The query execution ID, or None if there is none since the last
+            reset.
         """
         return self._query_id
 
@@ -1068,9 +1071,11 @@ class WithResultSet(BaseCursor, CursorIterator):
 
     @property
     def arraysize(self) -> int:
-        """The number of rows that ``fetchmany()`` fetches by default.
+        """The default number of rows per ``fetchmany()`` call.
 
-        Setting it to zero or a negative value raises ``ProgrammingError``.
+        ``execute()`` passes it to the new result set, so a change applies to
+        the result sets of later executions. Setting it to zero or a negative
+        value raises ``ProgrammingError``.
 
         Returns:
             The default number of rows per ``fetchmany()`` call.
