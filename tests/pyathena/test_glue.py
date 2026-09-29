@@ -210,7 +210,8 @@ class TestGlueMetadataClient:
                     "serde.param.field.delim": "\t",
                 },
             ),
-            # A view has empty SerDe information, which Athena still reports.
+            # A view has no formats and empty SerDe information; Athena reports
+            # only its empty location.
             (
                 {
                     "Parameters": {"comment": "Presto View", "presto_view": "true"},
@@ -220,12 +221,9 @@ class TestGlueMetadataClient:
                     "comment": "Presto View",
                     "presto_view": "true",
                     "location": "",
-                    "inputformat": None,
-                    "outputformat": None,
-                    "serde.serialization.lib": None,
                 },
             ),
-            # An Iceberg table has none, and Athena reports no SerDe library.
+            # An Iceberg table has no formats and no SerDe information.
             (
                 {
                     "Parameters": {"table_type": "ICEBERG", "metadata_location": "s3://m"},
@@ -235,16 +233,44 @@ class TestGlueMetadataClient:
                     "table_type": "ICEBERG",
                     "metadata_location": "s3://m",
                     "location": "s3://bucket/iceberg",
-                    "inputformat": None,
-                    "outputformat": None,
                 },
             ),
+            # An S3 Tables table has empty formats, which Athena reports.
+            (
+                {
+                    "Parameters": {"table_type": "ICEBERG"},
+                    "StorageDescriptor": {
+                        "Location": "s3://bucket--table-s3",
+                        "InputFormat": "",
+                        "OutputFormat": "",
+                    },
+                },
+                {
+                    "table_type": "ICEBERG",
+                    "location": "s3://bucket--table-s3",
+                    "inputformat": "",
+                    "outputformat": "",
+                },
+            ),
+            # The descriptor replaces table parameters of the same name, also
+            # when it leaves the value unset.
+            (
+                {
+                    "Parameters": {
+                        "location": "s3://table-parameter",
+                        "inputformat": "TableParameterInputFormat",
+                        "serde.serialization.lib": "TableParameterSerDe",
+                    },
+                    "StorageDescriptor": {"Location": "", "SerdeInfo": {}},
+                },
+                {"location": ""},
+            ),
         ],
-        ids=["hive", "view", "iceberg"],
+        ids=["hive", "view", "iceberg", "s3_tables", "table_parameter_collision"],
     )
     def test_table_metadata(self, table, expected_parameters):
         # Glue responses measured against GetTableMetadata for the same tables in
-        # #786; Athena flattens them this way.
+        # #786 and #887; Athena flattens them this way.
         table = {
             "Name": "t",
             "TableType": "EXTERNAL_TABLE",
