@@ -799,8 +799,9 @@ class WithResultSet(BaseCursor, CursorIterator):
 
     Provides the result set and its properties, fetch, ``close``,
     ``executemany``, ``cancel``, and sync iteration. The sync SQL cursors
-    subclass it directly; ``WithAsyncFetch`` overrides the fetch and lifecycle
-    methods with async versions for the asyncio cursors.
+    subclass it directly. For the asyncio cursors, ``WithAsyncFetch``
+    overrides ``executemany`` and ``cancel`` with async versions, and its
+    subclasses override the fetch methods.
     """
 
     def __init__(self, **kwargs) -> None:
