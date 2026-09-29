@@ -8,6 +8,7 @@ from re import Pattern
 from typing import (
     TYPE_CHECKING,
     Any,
+    ClassVar,
     cast,
 )
 
@@ -143,7 +144,7 @@ class AthenaDialect(DefaultDialect):
     preparer: type[IdentifierPreparer] = AthenaDMLIdentifierPreparer
     statement_compiler: type[SQLCompiler] = AthenaStatementCompiler
     ddl_compiler: type[DDLCompiler] = AthenaDDLCompiler
-    type_compiler: type[GenericTypeCompiler] = AthenaTypeCompiler
+    type_compiler_cls: ClassVar[type[GenericTypeCompiler]] = AthenaTypeCompiler
     default_paramstyle: str = pyathena.paramstyle
     max_identifier_length: int = 255
     cte_follows_insert: bool = True

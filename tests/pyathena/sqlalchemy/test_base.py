@@ -19,11 +19,13 @@ from sqlalchemy.sql.ddl import CreateTable
 from sqlalchemy.sql.schema import Column, MetaData, Table
 from sqlalchemy.sql.selectable import TextualSelect
 
+from pyathena.aio.sqlalchemy.base import AthenaAioDialect
 from pyathena.converter import DefaultTypeConverter
 from pyathena.cursor import Cursor
 from pyathena.error import DatabaseError, OperationalError
 from pyathena.formatter import DefaultParameterFormatter
 from pyathena.sqlalchemy.base import AthenaDialect
+from pyathena.sqlalchemy.compiler import AthenaTypeCompiler
 from pyathena.sqlalchemy.types import (
     TINYINT,
     AthenaArray,
@@ -108,6 +110,14 @@ def recording_engine(rowcounts=None, query="", config=None, **kwargs):
 
 
 class TestAthenaDialect:
+    @pytest.mark.parametrize("dialect_class", [AthenaDialect, AthenaAioDialect])
+    def test_type_compiler(self, dialect_class):
+        # SQLAlchemy 2.0 builds the type compiler from type_compiler_cls. A legacy
+        # type_compiler class attribute would take precedence over it.
+        assert not hasattr(dialect_class, "type_compiler")
+        assert dialect_class.type_compiler_cls is AthenaTypeCompiler
+        assert isinstance(dialect_class().type_compiler_instance, AthenaTypeCompiler)
+
     def test_columns_from_information_schema(self):
         # Rows arrive unordered, and Athena reports a missing comment as NULL.
         # The API cursor this path pins hands that over as None or as an empty
