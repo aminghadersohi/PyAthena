@@ -823,6 +823,11 @@ class WithResultSet(BaseCursor, CursorIterator):
 
     @property
     def result_set(self) -> AthenaResultSet | None:
+        """The result set of the last executed query.
+
+        Returns:
+            The result set, or None before a query succeeds or after a reset.
+        """
         return self._result_set
 
     @result_set.setter
@@ -855,6 +860,12 @@ class WithResultSet(BaseCursor, CursorIterator):
 
     @property
     def query_id(self) -> str | None:
+        """The query execution ID of the last started query.
+
+        Returns:
+            The query execution ID, or None if no query has started since the
+            last reset.
+        """
         return self._query_id
 
     @query_id.setter
@@ -1057,6 +1068,13 @@ class WithResultSet(BaseCursor, CursorIterator):
 
     @property
     def arraysize(self) -> int:
+        """The number of rows that ``fetchmany()`` fetches by default.
+
+        Setting it to zero or a negative value raises ``ProgrammingError``.
+
+        Returns:
+            The default number of rows per ``fetchmany()`` call.
+        """
         return self._arraysize
 
     @arraysize.setter
@@ -1067,6 +1085,12 @@ class WithResultSet(BaseCursor, CursorIterator):
 
     @property
     def rownumber(self) -> int | None:
+        """The zero-based index of the next row in the result set.
+
+        Returns:
+            The row index, or None if there is no result set or the index is
+            unknown.
+        """
         return self.result_set.rownumber if self.result_set else None
 
     def fetchone(
