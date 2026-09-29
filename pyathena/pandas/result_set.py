@@ -304,7 +304,7 @@ class AthenaPandasResultSet(AthenaResultSet):
         self._auto_optimize_chunksize = auto_optimize_chunksize
         self._data_manifest: list[str] = []
         self._kwargs = kwargs
-        self._fs = self.__s3_file_system()
+        self._fs = self._create_s3_file_system()
         self._csv_stream: TextIOWrapper | None = None
 
         # Cache time column names for efficient _trunc_date processing
@@ -427,7 +427,12 @@ class AthenaPandasResultSet(AthenaResultSet):
             return self.AUTO_CHUNK_SIZE_MEDIUM
         return None
 
-    def __s3_file_system(self):
+    def _create_s3_file_system(self):
+        """Create PyAthena's ``S3FileSystem`` from the connection settings.
+
+        Returns:
+            The S3 filesystem for reading the query results.
+        """
         from pyathena.filesystem.s3 import S3FileSystem
 
         return S3FileSystem(

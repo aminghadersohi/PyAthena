@@ -430,11 +430,14 @@ class AthenaDialect(DefaultDialect):
         # information_schema at once instead of waiting out the retry policy; the
         # query answers existence and columns, while table comments and options
         # still need the API. Other retryable codes keep the connection's policy.
-        # Connection.cursor() applies cursor_kwargs last, so a retry_config given
-        # there still runs its own retries before the fallback.
-        retry_config = self._without_fallback_retries(
-            raw_connection.retry_config  # type: ignore[union-attr]
-        )
+        # A retry_config given in cursor_kwargs replaces that policy entirely, so
+        # its own retries still run before the fallback.
+        if "retry_config" in raw_connection.cursor_kwargs:
+            retry_config = raw_connection.cursor_kwargs["retry_config"]
+        else:
+            retry_config = self._without_fallback_retries(
+                raw_connection.retry_config  # type: ignore[union-attr]
+            )
         with raw_connection.driver_connection.cursor(  # type: ignore[union-attr]
             retry_config=retry_config
         ) as cursor:
@@ -549,15 +552,12 @@ class AthenaDialect(DefaultDialect):
             )
             rows = cursor.fetchall()
         # Sort here: the query has no ORDER BY, so its result order is Athena's.
-        # The comment is still normalized at this boundary: a converter given in
-        # cursor_kwargs is applied after the one _internal_cursor() pins, and one
-        # written for a DataFrame cursor reports a missing value as NaN.
         return [
             self._column(
                 column_name,
                 # Athena exposes Hive STRING as unbounded VARCHAR in information_schema.
                 "string" if data_type == "varchar" else data_type,
-                comment if isinstance(comment, str) else None,
+                comment,
                 extra_info == "partition key" or None,
             )
             for _, column_name, data_type, comment, extra_info in sorted(

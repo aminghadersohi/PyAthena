@@ -225,6 +225,7 @@ class Connection(Generic[ConnectionCursor]):
             retry_config: Retry configuration for API calls. Uses default if None.
             cursor_class: Default cursor class for this connection.
             cursor_kwargs: Default keyword arguments for cursor creation.
+                Arguments passed to ``cursor()`` override the same keys.
             kill_on_interrupt: Cancel running queries on interrupt. Defaults to True.
             session: Pre-configured boto3 Session. Creates new session if None.
             config: Boto3 Config object for client configuration.
@@ -537,7 +538,8 @@ class Connection(Generic[ConnectionCursor]):
             cursor: Custom cursor class to use. If not provided, uses the
                 connection's default cursor class.
             **kwargs: Additional keyword arguments to pass to the cursor
-                constructor. These override connection defaults.
+                constructor. These override the connection's ``cursor_kwargs``
+                and its defaults.
 
         Returns:
             A cursor object that can execute SQL queries.
@@ -552,7 +554,7 @@ class Connection(Generic[ConnectionCursor]):
             >>> pandas_cursor = connection.cursor(PandasCursor)
             >>> df = pandas_cursor.execute("SELECT * FROM my_table").fetchall()
         """
-        kwargs.update(self.cursor_kwargs)
+        kwargs = {**self.cursor_kwargs, **kwargs}
         _cursor = cursor or self.cursor_class
         converter = kwargs.pop("converter", self._converter)
         if not converter:

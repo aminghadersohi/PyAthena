@@ -49,6 +49,7 @@ class AthenaQueryExecution:
     STATE_SUCCEEDED: str = "SUCCEEDED"
     STATE_FAILED: str = "FAILED"
     STATE_CANCELLED: str = "CANCELLED"
+    TERMINAL_STATES: tuple[str, ...] = (STATE_SUCCEEDED, STATE_FAILED, STATE_CANCELLED)
 
     STATEMENT_TYPE_DDL: str = "DDL"
     STATEMENT_TYPE_DML: str = "DML"
@@ -353,6 +354,7 @@ class AthenaCalculationExecutionStatus:
     STATE_CANCELED: str = "CANCELED"
     STATE_COMPLETED: str = "COMPLETED"
     STATE_FAILED: str = "FAILED"
+    TERMINAL_STATES: tuple[str, ...] = (STATE_COMPLETED, STATE_FAILED, STATE_CANCELED)
 
     def __init__(self, response: dict[str, Any]) -> None:
         status = response.get("Status")

@@ -343,21 +343,52 @@ class AthenaResultSet(CursorIterator):
             raise ProgrammingError("AthenaResultSet is closed.")
         return cast("Connection[Any]", self._connection)
 
-    def __get_query_results(
+    def _build_get_query_results_request(
         self, max_results: int, next_token: str | None = None
     ) -> dict[str, Any]:
+        """Build a ``GetQueryResults`` request for the result set's query.
+
+        Args:
+            max_results: The maximum number of rows in the page.
+            next_token: The token of the page to get; the first page if None.
+
+        Returns:
+            The request parameters.
+
+        Raises:
+            ProgrammingError: If the query ID is missing or the query has not
+                succeeded.
+        """
         if not self.query_id:
             raise ProgrammingError("QueryExecutionId is none or empty.")
         if self.state != AthenaQueryExecution.STATE_SUCCEEDED:
             raise ProgrammingError("QueryExecutionState is not SUCCEEDED.")
-        if self.is_closed:
-            raise ProgrammingError("AthenaResultSet is closed.")
         request: dict[str, Any] = {
             "QueryExecutionId": self.query_id,
             "MaxResults": max_results,
         }
         if next_token:
             request["NextToken"] = next_token
+        return request
+
+    def _get_query_results(self, max_results: int, next_token: str | None = None) -> dict[str, Any]:
+        """Get a page of query results with ``GetQueryResults``.
+
+        Args:
+            max_results: The maximum number of rows in the page.
+            next_token: The token of the page to get; the first page if None.
+
+        Returns:
+            The ``GetQueryResults`` response.
+
+        Raises:
+            ProgrammingError: If the query ID is missing, the query has not
+                succeeded, or the result set is closed.
+            OperationalError: If the request fails.
+        """
+        request = self._build_get_query_results_request(max_results, next_token)
+        if self.is_closed:
+            raise ProgrammingError("AthenaResultSet is closed.")
         try:
             response = retry_api_call(
                 self.connection.client.get_query_results,
@@ -371,18 +402,28 @@ class AthenaResultSet(CursorIterator):
         else:
             return cast(dict[str, Any], response)
 
-    def __fetch(self, next_token: str | None = None) -> dict[str, Any]:
-        return self.__get_query_results(self._arraysize, next_token)
-
     def _fetch(self) -> None:
+        """Fetch the next page of rows into the result set.
+
+        Raises:
+            ProgrammingError: If there is no next page.
+            OperationalError: If the request fails.
+        """
         if not self._next_token:
             raise ProgrammingError("NextToken is none or empty.")
-        response = self.__fetch(self._next_token)
+        response = self._get_query_results(self._arraysize, self._next_token)
         rows, self._next_token = self._parse_result_rows(response)
         self._process_rows(rows)
 
     def _pre_fetch(self) -> None:
-        response = self.__fetch()
+        """Fetch the first page of rows along with the result metadata.
+
+        Raises:
+            ProgrammingError: If the query ID is missing, the query has not
+                succeeded, or the result set is closed.
+            OperationalError: If the request fails.
+        """
+        response = self._get_query_results(self._arraysize)
         self._process_metadata(response)
         self._process_update_count(response)
         rows, self._next_token = self._parse_result_rows(response)
@@ -600,7 +641,7 @@ class AthenaResultSet(CursorIterator):
         next_token: str | None = None
 
         while True:
-            response = self.__get_query_results(self.DEFAULT_FETCH_SIZE, next_token)
+            response = self._get_query_results(self.DEFAULT_FETCH_SIZE, next_token)
             rows, next_token = self._parse_result_rows(response)
 
             offset = 1 if rows and self._is_first_row_column_labels(rows) else 0

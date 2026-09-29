@@ -85,21 +85,26 @@ class AthenaAioResultSet(AthenaResultSet):
             await result_set._async_pre_fetch()
         return result_set
 
-    async def __async_get_query_results(
+    async def _async_get_query_results(
         self, max_results: int, next_token: str | None = None
     ) -> dict[str, Any]:
-        if not self.query_id:
-            raise ProgrammingError("QueryExecutionId is none or empty.")
-        if self.state != AthenaQueryExecution.STATE_SUCCEEDED:
-            raise ProgrammingError("QueryExecutionState is not SUCCEEDED.")
+        """Get a page of query results with ``GetQueryResults``.
+
+        Args:
+            max_results: The maximum number of rows in the page.
+            next_token: The token of the page to get; the first page if None.
+
+        Returns:
+            The ``GetQueryResults`` response.
+
+        Raises:
+            ProgrammingError: If the query ID is missing, the query has not
+                succeeded, or the result set is closed.
+            OperationalError: If the request fails.
+        """
+        request = self._build_get_query_results_request(max_results, next_token)
         if self.is_closed:
             raise ProgrammingError("AthenaAioResultSet is closed.")
-        request: dict[str, Any] = {
-            "QueryExecutionId": self.query_id,
-            "MaxResults": max_results,
-        }
-        if next_token:
-            request["NextToken"] = next_token
         try:
             response = await async_retry_api_call(
                 self.connection.client.get_query_results,
@@ -113,18 +118,28 @@ class AthenaAioResultSet(AthenaResultSet):
         else:
             return cast(dict[str, Any], response)
 
-    async def __async_fetch(self, next_token: str | None = None) -> dict[str, Any]:
-        return await self.__async_get_query_results(self._arraysize, next_token)
-
     async def _async_fetch(self) -> None:
+        """Fetch the next page of rows into the result set.
+
+        Raises:
+            ProgrammingError: If there is no next page.
+            OperationalError: If the request fails.
+        """
         if not self._next_token:
             raise ProgrammingError("NextToken is none or empty.")
-        response = await self.__async_fetch(self._next_token)
+        response = await self._async_get_query_results(self._arraysize, self._next_token)
         rows, self._next_token = self._parse_result_rows(response)
         self._process_rows(rows)
 
     async def _async_pre_fetch(self) -> None:
-        response = await self.__async_fetch()
+        """Fetch the first page of rows along with the result metadata.
+
+        Raises:
+            ProgrammingError: If the query ID is missing, the query has not
+                succeeded, or the result set is closed.
+            OperationalError: If the request fails.
+        """
+        response = await self._async_get_query_results(self._arraysize)
         self._process_metadata(response)
         self._process_update_count(response)
         rows, self._next_token = self._parse_result_rows(response)
