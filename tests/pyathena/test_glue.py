@@ -252,8 +252,21 @@ class TestGlueMetadataClient:
                     "outputformat": "",
                 },
             ),
+            # The descriptor replaces table parameters of the same name, also
+            # when it leaves the value unset.
+            (
+                {
+                    "Parameters": {
+                        "location": "s3://table-parameter",
+                        "inputformat": "TableParameterInputFormat",
+                        "serde.serialization.lib": "TableParameterSerDe",
+                    },
+                    "StorageDescriptor": {"Location": "", "SerdeInfo": {}},
+                },
+                {"location": ""},
+            ),
         ],
-        ids=["hive", "view", "iceberg", "s3_tables"],
+        ids=["hive", "view", "iceberg", "s3_tables", "table_parameter_collision"],
     )
     def test_table_metadata(self, table, expected_parameters):
         # Glue responses measured against GetTableMetadata for the same tables in

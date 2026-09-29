@@ -243,12 +243,14 @@ class GlueMetadataClient:
     def table_metadata(table: Mapping[str, Any]) -> AthenaTableMetadata:
         """Build the metadata Athena reports for a Glue table.
 
-        Athena flattens the storage descriptor into the table parameters: the
-        location, formats, and SerDe library whenever they are set (an empty
-        string included), and SerDe parameters with a ``serde.param.`` prefix.
-        The Glue description is not the table comment. Glue keeps an Iceberg
-        table's dropped and renamed columns, marked as not current, which
-        Athena leaves out.
+        Athena flattens the storage descriptor into the table parameters,
+        replacing parameters of the same name: the location and formats, the
+        SerDe library whenever the descriptor has SerDe information, and SerDe
+        parameters with a ``serde.param.`` prefix. A value the descriptor
+        leaves unset is left out rather than reported as None; an empty string
+        is kept. The Glue description is not the table comment. Glue keeps an
+        Iceberg table's dropped and renamed columns, marked as not current,
+        which Athena leaves out.
 
         Args:
             table: A ``Table`` from a Glue ``GetTable`` or ``GetTables`` response.
@@ -262,10 +264,15 @@ class GlueMetadataClient:
             "location": descriptor.get("Location"),
             "inputformat": descriptor.get("InputFormat"),
             "outputformat": descriptor.get("OutputFormat"),
-            "serde.serialization.lib": serde.get("SerializationLibrary"),
         }
+        if "SerdeInfo" in descriptor:
+            storage["serde.serialization.lib"] = serde.get("SerializationLibrary")
         parameters = dict(table.get("Parameters") or {})
-        parameters.update({k: v for k, v in storage.items() if v is not None})
+        for key, value in storage.items():
+            if value is None:
+                parameters.pop(key, None)
+            else:
+                parameters[key] = value
         parameters.update(
             {f"serde.param.{k}": v for k, v in (serde.get("Parameters") or {}).items()}
         )
