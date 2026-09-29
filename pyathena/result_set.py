@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import collections
 import logging
-from abc import abstractmethod
 from datetime import datetime
 from typing import (
     TYPE_CHECKING,
@@ -795,9 +794,25 @@ class AthenaDictResultSet(AthenaResultSet):
         ]
 
 
-class WithResultSet:
-    def __init__(self):
-        super().__init__()
+class WithResultSet(BaseCursor, CursorIterator):
+    """Base class of the SQL cursors that keep a result set.
+
+    Provides the result set and its properties, fetch, ``close``,
+    ``executemany``, ``cancel``, and sync iteration. The sync SQL cursors
+    subclass it directly. For the asyncio cursors, ``WithAsyncFetch``
+    overrides ``executemany`` and ``cancel`` with async versions, and its
+    subclasses override the fetch methods.
+    """
+
+    def __init__(self, **kwargs) -> None:
+        """Initialize the cursor with no query ID and no result set.
+
+        Args:
+            **kwargs: Arguments passed to ``BaseCursor.__init__``.
+        """
+        super().__init__(**kwargs)
+        self._query_id: str | None = None
+        self._result_set: AthenaResultSet | None = None
 
     def _reset_state(self) -> None:
         self._rowcount = -1
@@ -807,14 +822,17 @@ class WithResultSet:
         self.result_set = None
 
     @property
-    @abstractmethod
     def result_set(self) -> AthenaResultSet | None:
-        raise NotImplementedError  # pragma: no cover
+        """The result set of the last executed query.
+
+        Returns:
+            The result set, or None before a query succeeds or after a reset.
+        """
+        return self._result_set
 
     @result_set.setter
-    @abstractmethod
     def result_set(self, val: AthenaResultSet | None) -> None:
-        raise NotImplementedError  # pragma: no cover
+        self._result_set = val
 
     @property
     def has_result_set(self) -> bool:
@@ -841,14 +859,21 @@ class WithResultSet:
         return self.result_set.catalog
 
     @property
-    @abstractmethod
     def query_id(self) -> str | None:
-        raise NotImplementedError  # pragma: no cover
+        """The query execution ID of the last execution.
+
+        With ``cache_size`` or ``cache_expiration_time``, this can be the ID of
+        a previous execution whose result is reused.
+
+        Returns:
+            The query execution ID, or None if there is none since the last
+            reset.
+        """
+        return self._query_id
 
     @query_id.setter
-    @abstractmethod
     def query_id(self, val: str | None) -> None:
-        raise NotImplementedError  # pragma: no cover
+        self._query_id = val
 
     @property
     def query(self) -> str | None:
@@ -1044,26 +1069,17 @@ class WithResultSet:
         """
         return self.result_set.rowcount if self.result_set else self._rowcount
 
-
-class WithFetch(BaseCursor, CursorIterator, WithResultSet):
-    """Mixin providing shared properties, fetch, lifecycle, and sync iteration for SQL cursors.
-
-    Provides properties (``arraysize``, ``result_set``, ``query_id``,
-    ``rownumber``, ``rowcount``), lifecycle methods (``close``, ``executemany``,
-    ``cancel``), default sync fetch (for cursors whose result sets load all
-    data eagerly in ``__init__``), and the sync iteration protocol.
-
-    Subclasses override ``execute()`` and optionally ``__init__`` and
-    format-specific helpers.
-    """
-
-    def __init__(self, **kwargs) -> None:
-        super().__init__(**kwargs)
-        self._query_id: str | None = None
-        self._result_set: AthenaResultSet | None = None
-
     @property
     def arraysize(self) -> int:
+        """The default number of rows per ``fetchmany()`` call.
+
+        ``execute()`` passes it to the new result set, so a change applies to
+        the result sets of later executions. Setting it to zero or a negative
+        value raises ``ProgrammingError``.
+
+        Returns:
+            The default number of rows per ``fetchmany()`` call.
+        """
         return self._arraysize
 
     @arraysize.setter
@@ -1073,28 +1089,65 @@ class WithFetch(BaseCursor, CursorIterator, WithResultSet):
         self._arraysize = value
 
     @property
-    def result_set(self) -> AthenaResultSet | None:
-        return self._result_set
-
-    @result_set.setter
-    def result_set(self, val) -> None:
-        self._result_set = val
-
-    @property
-    def query_id(self) -> str | None:
-        return self._query_id
-
-    @query_id.setter
-    def query_id(self, val) -> None:
-        self._query_id = val
-
-    @property
     def rownumber(self) -> int | None:
+        """The zero-based index of the next row in the result set.
+
+        Returns:
+            The row index, or None if there is no result set or the index is
+            unknown.
+        """
         return self.result_set.rownumber if self.result_set else None
 
-    @property
-    def rowcount(self) -> int:
-        return self.result_set.rowcount if self.result_set else self._rowcount
+    def fetchone(
+        self,
+    ) -> tuple[Any | None, ...] | dict[Any, Any | None] | None:
+        """Fetch the next row of the result set.
+
+        Returns:
+            A tuple representing the next row, or None if no more rows.
+
+        Raises:
+            ProgrammingError: If no result set is available.
+        """
+        if not self.has_result_set:
+            raise ProgrammingError("No result set.")
+        result_set = cast(AthenaResultSet, self.result_set)
+        return result_set.fetchone()
+
+    def fetchmany(
+        self, size: int | None = None
+    ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
+        """Fetch multiple rows from the result set.
+
+        Args:
+            size: Maximum number of rows to fetch. Defaults to arraysize.
+
+        Returns:
+            List of tuples representing the fetched rows.
+
+        Raises:
+            ProgrammingError: If no result set is available.
+        """
+        if not self.has_result_set:
+            raise ProgrammingError("No result set.")
+        result_set = cast(AthenaResultSet, self.result_set)
+        return result_set.fetchmany(size)
+
+    def fetchall(
+        self,
+    ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
+        """Fetch all remaining rows from the result set.
+
+        Returns:
+            List of tuples representing all remaining rows.
+
+        Raises:
+            ProgrammingError: If no result set is available.
+        """
+        if not self.has_result_set:
+            raise ProgrammingError("No result set.")
+        result_set = cast(AthenaResultSet, self.result_set)
+        return result_set.fetchall()
 
     def close(self) -> None:
         """Close the cursor and release associated resources."""
@@ -1148,54 +1201,3 @@ class WithFetch(BaseCursor, CursorIterator, WithResultSet):
         if not self.query_id:
             raise ProgrammingError("QueryExecutionId is none or empty.")
         self._cancel(self.query_id)
-
-    def fetchone(
-        self,
-    ) -> tuple[Any | None, ...] | dict[Any, Any | None] | None:
-        """Fetch the next row of the result set.
-
-        Returns:
-            A tuple representing the next row, or None if no more rows.
-
-        Raises:
-            ProgrammingError: If no result set is available.
-        """
-        if not self.has_result_set:
-            raise ProgrammingError("No result set.")
-        result_set = cast(AthenaResultSet, self.result_set)
-        return result_set.fetchone()
-
-    def fetchmany(
-        self, size: int | None = None
-    ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
-        """Fetch multiple rows from the result set.
-
-        Args:
-            size: Maximum number of rows to fetch. Defaults to arraysize.
-
-        Returns:
-            List of tuples representing the fetched rows.
-
-        Raises:
-            ProgrammingError: If no result set is available.
-        """
-        if not self.has_result_set:
-            raise ProgrammingError("No result set.")
-        result_set = cast(AthenaResultSet, self.result_set)
-        return result_set.fetchmany(size)
-
-    def fetchall(
-        self,
-    ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
-        """Fetch all remaining rows from the result set.
-
-        Returns:
-            List of tuples representing all remaining rows.
-
-        Raises:
-            ProgrammingError: If no result set is available.
-        """
-        if not self.has_result_set:
-            raise ProgrammingError("No result set.")
-        result_set = cast(AthenaResultSet, self.result_set)
-        return result_set.fetchall()

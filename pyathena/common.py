@@ -914,6 +914,76 @@ class BaseCursor(metaclass=ABCMeta):
                 raise e
         return query_execution
 
+    def _cache_search_limits(
+        self, cache_size: int, cache_expiration_time: int
+    ) -> tuple[int, datetime | None]:
+        """Resolve how far the result cache search looks back. No I/O.
+
+        Args:
+            cache_size: The number of recent executions to search, or 0.
+            cache_expiration_time: The maximum age of a reused result in
+                seconds, or 0 for no limit.
+
+        Returns:
+            The number of executions to search, unbounded when only
+            ``cache_expiration_time`` is set, and the oldest completion time
+            to accept, or None for no limit.
+        """
+        if cache_size == 0 and cache_expiration_time > 0:
+            cache_size = sys.maxsize
+        if cache_expiration_time > 0:
+            expiration_time = datetime.now(UTC) - timedelta(seconds=cache_expiration_time)
+            return cache_size, expiration_time
+        return cache_size, None
+
+    def _match_previous_query(
+        self,
+        query: str,
+        query_executions: list[AthenaQueryExecution],
+        expiration_time: datetime | None,
+    ) -> tuple[str | None, bool]:
+        """Find the latest reusable execution of a query in one page. No I/O.
+
+        Reusable executions are succeeded DML queries with the same query
+        string, schema, and catalog (case-insensitive). Executions are checked
+        from the latest completion; the check stops at the first one completed
+        before ``expiration_time``.
+
+        Args:
+            query: The query string.
+            query_executions: One page of the work group's executions.
+            expiration_time: The oldest completion time to accept, or None for
+                no limit.
+
+        Returns:
+            The matching query ID or None, and whether the check reached an
+            expired execution.
+        """
+        for execution in sorted(
+            (
+                e
+                for e in query_executions
+                if e.state == AthenaQueryExecution.STATE_SUCCEEDED
+                and e.statement_type == AthenaQueryExecution.STATEMENT_TYPE_DML
+            ),
+            # https://github.com/python/mypy/issues/9656
+            key=lambda e: e.completion_date_time,  # type: ignore[arg-type, return-value]
+            reverse=True,
+        ):
+            if (
+                expiration_time
+                and execution.completion_date_time
+                and execution.completion_date_time.astimezone(UTC) < expiration_time
+            ):
+                return None, True
+            if (
+                execution.query == query
+                and execution.database == self._schema_name
+                and (execution.catalog or "").lower() == (self._catalog_name or "").lower()
+            ):
+                return execution.query_id, False
+        return None, False
+
     def _find_previous_query_id(
         self,
         query: str,
@@ -921,13 +991,23 @@ class BaseCursor(metaclass=ABCMeta):
         cache_size: int = 0,
         cache_expiration_time: int = 0,
     ) -> str | None:
+        """Find a previous execution of a query whose result can be reused.
+
+        Searches the work group's recent executions page by page. A failed
+        search is logged and treated as a cache miss.
+
+        Args:
+            query: The query string.
+            work_group: The work group to search, or None for the cursor's.
+            cache_size: The number of recent executions to search, or 0.
+            cache_expiration_time: The maximum age of a reused result in
+                seconds, or 0 for no limit.
+
+        Returns:
+            The query ID of the latest reusable execution, or None.
+        """
+        cache_size, expiration_time = self._cache_search_limits(cache_size, cache_expiration_time)
         query_id = None
-        if cache_size == 0 and cache_expiration_time > 0:
-            cache_size = sys.maxsize
-        if cache_expiration_time > 0:
-            expiration_time = datetime.now(UTC) - timedelta(seconds=cache_expiration_time)
-        else:
-            expiration_time = datetime.now(UTC)
         try:
             next_token = None
             while cache_size > 0:
@@ -936,32 +1016,10 @@ class BaseCursor(metaclass=ABCMeta):
                 next_token, query_executions = self._list_query_executions(
                     work_group, next_token=next_token, max_results=max_results
                 )
-                for execution in sorted(
-                    (
-                        e
-                        for e in query_executions
-                        if e.state == AthenaQueryExecution.STATE_SUCCEEDED
-                        and e.statement_type == AthenaQueryExecution.STATEMENT_TYPE_DML
-                    ),
-                    # https://github.com/python/mypy/issues/9656
-                    key=lambda e: e.completion_date_time,  # type: ignore[arg-type, return-value]
-                    reverse=True,
-                ):
-                    if (
-                        cache_expiration_time > 0
-                        and execution.completion_date_time
-                        and execution.completion_date_time.astimezone(UTC) < expiration_time
-                    ):
-                        next_token = None
-                        break
-                    if (
-                        execution.query == query
-                        and execution.database == self._schema_name
-                        and (execution.catalog or "").lower() == (self._catalog_name or "").lower()
-                    ):
-                        query_id = execution.query_id
-                        break
-                if query_id or next_token is None:
+                query_id, expired = self._match_previous_query(
+                    query, query_executions, expiration_time
+                )
+                if query_id or expired or next_token is None:
                     break
         except Exception:
             _logger.warning("Failed to check the cache. Moving on without cache.", exc_info=True)
@@ -1030,6 +1088,36 @@ class BaseCursor(metaclass=ABCMeta):
         if options.on_start_query_execution:
             options.on_start_query_execution(query_id)
 
+    def _build_execute_request(
+        self,
+        operation: str,
+        parameters: dict[str, Any] | list[str] | None,
+        options: ExecuteOptions,
+    ) -> tuple[str, dict[str, Any]]:
+        """Format a query and build its ``StartQueryExecution`` request. No I/O.
+
+        Args:
+            operation: SQL query string.
+            parameters: Query parameters.
+            options: The resolved execution options.
+
+        Returns:
+            Tuple of (formatted_query, request).
+
+        Raises:
+            ProgrammingError: If the formatter rejects the query or its parameters.
+        """
+        query, execution_parameters = self._prepare_query(operation, parameters, options.paramstyle)
+        request = self._build_start_query_execution_request(
+            query=query,
+            work_group=options.work_group,
+            s3_staging_dir=options.s3_staging_dir,
+            result_reuse_enable=options.result_reuse_enable,
+            result_reuse_minutes=options.result_reuse_minutes,
+            execution_parameters=execution_parameters,
+        )
+        return query, request
+
     def _execute(
         self,
         operation: str,
@@ -1043,6 +1131,30 @@ class BaseCursor(metaclass=ABCMeta):
         paramstyle: str | None = None,
         options: ExecuteOptions | None = None,
     ) -> str:
+        """Start a query execution, or find a previous one to reuse.
+
+        The individual keyword arguments override the ``options`` field of the
+        same name unless None.
+
+        Args:
+            operation: SQL query string.
+            parameters: Query parameters.
+            work_group: Athena work group.
+            s3_staging_dir: S3 location for query results.
+            cache_size: Number of recent executions to search for a reusable result.
+            cache_expiration_time: Maximum age of a reusable result in seconds.
+            result_reuse_enable: Whether to enable Athena result reuse.
+            result_reuse_minutes: Maximum age of an Athena-reused result in minutes.
+            paramstyle: Parameter style ('qmark' or 'pyformat').
+            options: The execution options.
+
+        Returns:
+            The query execution ID.
+
+        Raises:
+            ProgrammingError: If the formatter rejects the query or its parameters.
+            DatabaseError: If the ``StartQueryExecution`` request fails.
+        """
         # The individual keyword arguments are retained for backward compatibility
         # with external callers that predate ExecuteOptions (e.g. dbt-athena <= 1.10.x
         # calls _execute() with work_group/s3_staging_dir/cache_* keywords).
@@ -1056,16 +1168,7 @@ class BaseCursor(metaclass=ABCMeta):
             result_reuse_minutes=result_reuse_minutes,
             paramstyle=paramstyle,
         )
-        query, execution_parameters = self._prepare_query(operation, parameters, options.paramstyle)
-
-        request = self._build_start_query_execution_request(
-            query=query,
-            work_group=options.work_group,
-            s3_staging_dir=options.s3_staging_dir,
-            result_reuse_enable=options.result_reuse_enable,
-            result_reuse_minutes=options.result_reuse_minutes,
-            execution_parameters=execution_parameters,
-        )
+        query, request = self._build_execute_request(operation, parameters, options)
         query_id = self._find_previous_query_id(
             query,
             options.work_group,

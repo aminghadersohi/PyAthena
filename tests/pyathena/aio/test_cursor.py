@@ -1,8 +1,8 @@
 import asyncio
 import re
 import threading
-from datetime import UTC, datetime
-from unittest.mock import AsyncMock, MagicMock, patch
+from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
@@ -15,7 +15,7 @@ from pyathena.result_set import AthenaResultSet
 from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.aio.conftest import _aio_connect
-from tests.pyathena.util import throttle_metadata_api
+from tests.pyathena.util import succeeded_query_execution, throttle_metadata_api
 
 
 class TestAioCursor:
@@ -232,6 +232,74 @@ class TestAioCursor:
                 await cursor._find_previous_query_id(query, None, cache_size=100)
                 == "query_id_awsdatacatalog"
             )
+
+    async def test_cache_search_stops_at_expired_execution(self, caplog):
+        query = "SELECT * FROM one_row"
+        now = datetime.now(UTC)
+        cursor = AioCursor.__new__(AioCursor)
+        cursor._schema_name = "this_schema"
+        cursor._catalog_name = None
+        page = [
+            succeeded_query_execution("expired", query, now - timedelta(hours=2)),
+            succeeded_query_execution("other", "SELECT 1", now),
+        ]
+
+        # A page read after the expired execution would return this match.
+        next_page = (None, [succeeded_query_execution("next_page", query, now)])
+
+        with patch.object(
+            AioCursor,
+            "_list_query_executions",
+            new_callable=AsyncMock,
+            side_effect=[("next_token", page), next_page],
+        ) as list_mock:
+            # Without cache_size, cache_expiration_time alone bounds the search.
+            assert (
+                await cursor._find_previous_query_id(query, None, cache_expiration_time=3600)
+                is None
+            )
+        list_mock.assert_awaited_once_with(None, next_token=None, max_results=50)
+        # A failed search also returns None; the expiry must stop it without an error.
+        assert "Failed to check the cache" not in caplog.text
+
+    async def test_cache_search_reads_pages_up_to_cache_size(self):
+        query = "SELECT * FROM one_row"
+        now = datetime.now(UTC)
+        cursor = AioCursor.__new__(AioCursor)
+        cursor._schema_name = "this_schema"
+        cursor._catalog_name = None
+        pages = [
+            ("next_token", [succeeded_query_execution("other", "SELECT 1", now)]),
+            ("last_token", [succeeded_query_execution("match", query, now)]),
+        ]
+
+        with patch.object(
+            AioCursor, "_list_query_executions", new_callable=AsyncMock, side_effect=pages
+        ) as list_mock:
+            assert await cursor._find_previous_query_id(query, "wg", cache_size=60) == "match"
+        assert list_mock.await_args_list == [
+            call("wg", next_token=None, max_results=50),
+            call("wg", next_token="next_token", max_results=10),
+        ]
+
+    async def test_cache_search_prefers_latest_execution(self):
+        query = "SELECT * FROM one_row"
+        now = datetime.now(UTC)
+        cursor = AioCursor.__new__(AioCursor)
+        cursor._schema_name = "this_schema"
+        cursor._catalog_name = None
+        page = [
+            succeeded_query_execution("older", query, now - timedelta(minutes=1)),
+            succeeded_query_execution("latest", query, now),
+        ]
+
+        with patch.object(
+            AioCursor,
+            "_list_query_executions",
+            new_callable=AsyncMock,
+            return_value=(None, page),
+        ):
+            assert await cursor._find_previous_query_id(query, None, cache_size=10) == "latest"
 
     async def test_no_result_set_raises(self, aio_cursor):
         with pytest.raises(ProgrammingError):

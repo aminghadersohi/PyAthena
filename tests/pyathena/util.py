@@ -14,7 +14,7 @@ from jinja2 import Environment, FileSystemLoader
 from sqlalchemy import types
 
 from pyathena.glue import GlueMetadataClient
-from pyathena.model import AthenaCalculationExecutionStatus
+from pyathena.model import AthenaCalculationExecutionStatus, AthenaQueryExecution
 
 _queries = Environment(
     loader=FileSystemLoader(Path(__file__).parents[1].resolve() / "resources" / "queries")
@@ -49,6 +49,34 @@ def throttle_metadata_api(
     for operation in operations:
         monkeypatch.setattr(client, operation, failing(operation))
     return calls
+
+
+def succeeded_query_execution(query_id, query, completion_date_time, schema="this_schema"):
+    """Build a succeeded DML query execution, as the result cache search lists it.
+
+    Args:
+        query_id: The query execution ID.
+        query: The query string.
+        completion_date_time: The completion time.
+        schema: The database the query ran against.
+
+    Returns:
+        The query execution.
+    """
+    return AthenaQueryExecution(
+        {
+            "QueryExecution": {
+                "QueryExecutionId": query_id,
+                "Query": query,
+                "StatementType": AthenaQueryExecution.STATEMENT_TYPE_DML,
+                "QueryExecutionContext": {"Database": schema},
+                "Status": {
+                    "State": AthenaQueryExecution.STATE_SUCCEEDED,
+                    "CompletionDateTime": completion_date_time,
+                },
+            }
+        }
+    )
 
 
 def unreachable_glue(connection):
