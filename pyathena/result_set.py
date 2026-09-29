@@ -794,17 +794,22 @@ class AthenaDictResultSet(AthenaResultSet):
         ]
 
 
-class WithResultSet:
-    """Mixin providing a SQL cursor's result set, its properties, and default fetch.
+class WithResultSet(BaseCursor, CursorIterator):
+    """Base class of the SQL cursors that keep a result set.
 
-    Shared by the sync (``WithFetch``) and asyncio (``WithAsyncFetch``) cursors.
-    The fetch methods call the result set synchronously; the asyncio cursors
-    override them with async versions.
+    Provides the result set and its properties, fetch, ``close``,
+    ``executemany``, ``cancel``, and sync iteration. The sync SQL cursors
+    subclass it directly; ``WithAsyncFetch`` overrides the fetch and lifecycle
+    methods with async versions for the asyncio cursors.
     """
 
-    def __init__(self):
-        """Initialize the mixin with no query ID and no result set."""
-        super().__init__()
+    def __init__(self, **kwargs) -> None:
+        """Initialize the cursor with no query ID and no result set.
+
+        Args:
+            **kwargs: Arguments passed to ``BaseCursor.__init__``.
+        """
+        super().__init__(**kwargs)
         self._query_id: str | None = None
         self._result_set: AthenaResultSet | None = None
 
@@ -1113,18 +1118,6 @@ class WithResultSet:
             raise ProgrammingError("No result set.")
         result_set = cast(AthenaResultSet, self.result_set)
         return result_set.fetchall()
-
-
-class WithFetch(BaseCursor, WithResultSet, CursorIterator):
-    """Mixin providing sync lifecycle and iteration for SQL cursors.
-
-    Adds ``close``, ``executemany``, and ``cancel`` to the properties and
-    default fetch methods of ``WithResultSet``, and the sync iteration
-    protocol through ``CursorIterator``.
-
-    Subclasses override ``execute()`` and optionally ``__init__`` and
-    format-specific helpers.
-    """
 
     def close(self) -> None:
         """Close the cursor and release associated resources."""

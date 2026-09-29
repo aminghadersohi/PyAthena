@@ -8,7 +8,7 @@ from typing import Any, TypeVar
 from botocore.exceptions import BotoCoreError, ClientError
 
 from pyathena.aio.util import async_retry_api_call
-from pyathena.common import BaseCursor, CursorIterator
+from pyathena.common import BaseCursor
 from pyathena.error import DatabaseError, OperationalError, ProgrammingError
 from pyathena.glue import GlueMetadataClient
 from pyathena.model import AthenaDatabase, AthenaQueryExecution, AthenaTableMetadata
@@ -617,23 +617,16 @@ class AioBaseCursor(BaseCursor):
         )
 
 
-class WithAsyncFetch(AioBaseCursor, WithResultSet, CursorIterator):
-    """Mixin providing async lifecycle and the async protocol for SQL cursors.
+class WithAsyncFetch(AioBaseCursor, WithResultSet):
+    """Base class of the asyncio SQL cursors.
 
-    Adds ``close``, async ``executemany`` and ``cancel``, async iteration, and
-    the async context manager protocol to the properties and sync fetch
-    methods of ``WithResultSet``. Subclasses override the fetch methods with
-    async versions.
+    Overrides ``executemany`` and ``cancel`` of ``WithResultSet`` with async
+    versions and adds async iteration and the async context manager protocol.
+    Subclasses override the fetch methods with async versions.
 
     Subclasses override ``execute()`` and optionally ``__init__`` and
     format-specific helpers.
     """
-
-    def close(self) -> None:
-        """Close the cursor and release associated resources."""
-        self._rowcount = -1
-        if self.result_set and not self.result_set.is_closed:
-            self.result_set.close()
 
     async def executemany(  # type: ignore[override]
         self,
@@ -672,7 +665,7 @@ class WithAsyncFetch(AioBaseCursor, WithResultSet, CursorIterator):
         self._reset_state()
         self._rowcount = rowcount
 
-    async def cancel(self) -> None:
+    async def cancel(self) -> None:  # type: ignore[override]
         """Cancel the currently executing query.
 
         Raises:
