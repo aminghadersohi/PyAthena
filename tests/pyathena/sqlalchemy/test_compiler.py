@@ -743,133 +743,11 @@ class TestAthenaStatementCompiler:
         assert self._format_sql(stmt).endswith(f"WHERE x LIKE '{pattern}'")
 
 
-class TestStructColumnDDL:
-    """CREATE TABLE renders STRUCT and nested MAP types with Hive syntax."""
-
-    def _ddl(self, *columns):
-        table = Table(
-            "events",
-            MetaData(schema="analytics"),
-            *columns,
-            awsathena_location="s3://bucket/events/",
-            awsathena_file_format="PARQUET",
-        )
-        return str(CreateTable(table).compile(dialect=AthenaDialect()))
-
-    def test_create_table_renders_hive_struct_syntax(self):
-        ddl = self._ddl(
-            Column("id", Integer),
-            Column("scores", AthenaArray(Integer)),
-            Column(
-                "profile",
-                AthenaStruct(
-                    ("name", String),
-                    ("age", Integer),
-                    ("ratio", Float(24)),
-                    ("address", AthenaStruct(("city", String), ("zip", Integer))),
-                ),
-            ),
-            Column(
-                "labels",
-                AthenaMap(String, AthenaStruct(("value", String), ("count", Integer))),
-            ),
-            Column(
-                "nested_maps",
-                AthenaMap(String, AthenaMap(Integer, AthenaStruct(("n", Integer)))),
-            ),
-            Column(
-                "mixed",
-                AthenaStruct(
-                    ("tags", AthenaArray(String)),
-                    ("attrs", AthenaMap(String, Integer)),
-                    ("scores", AthenaArray(Integer)),
-                ),
-            ),
-            Column(
-                "deep",
-                AthenaArray(
-                    AthenaMap(String, AthenaStruct(("value", String), ("flag", types.Boolean)))
-                ),
-            ),
-        )
-        assert "id INT" in ddl
-        assert "scores ARRAY<INT>" in ddl
-        assert (
-            "profile STRUCT<name:STRING, age:INT, ratio:FLOAT, "
-            "address:STRUCT<city:STRING, zip:INT>>"
-        ) in ddl
-        assert "labels MAP<STRING, STRUCT<value:STRING, count:INT>>" in ddl
-        assert "nested_maps MAP<STRING, MAP<INT, STRUCT<n:INT>>>" in ddl
-        assert (
-            "mixed STRUCT<tags:ARRAY<STRING>, attrs:MAP<STRING, INT>, scores:ARRAY<INT>>"
-        ) in ddl
-        assert "deep ARRAY<MAP<STRING, STRUCT<value:STRING, flag:BOOLEAN>>>" in ddl
-        assert "ROW(" not in ddl
-        assert "INTEGER" not in ddl
-        assert "REAL" not in ddl
-        assert "FLOAT(" not in ddl
-
-    def test_struct_field_quoting_follows_ddl_preparer(self):
-        struct_type = AthenaStruct(
-            ("date", String),
-            ("select", Integer),
-            ('na"me', String),
-            ("a`b", String),
-            ("first name", String),
-            ("_hidden", Integer),
-        )
-        ddl = self._ddl(Column("payload", struct_type))
-        assert (
-            'payload STRUCT<`date`:STRING, `select`:INT, `na"me`:STRING, '
-            "`a``b`:STRING, `first name`:STRING, `_hidden`:INT>"
-        ) in ddl
-        cast_sql = str(cast(column("payload"), struct_type).compile(dialect=AthenaDialect()))
-        assert cast_sql == (
-            'CAST(payload AS ROW(date VARCHAR, "select" INTEGER, "na""me" VARCHAR, '
-            '"a`b" VARCHAR, "first name" VARCHAR, _hidden INTEGER))'
-        )
-
-    def test_empty_struct_column_stays_row(self):
-        ddl = self._ddl(
-            Column("empty", AthenaStruct()),
-            Column("filled", AthenaStruct(("n", Integer))),
-        )
-        assert "empty ROW()" in ddl
-        assert "filled STRUCT<n:INT>" in ddl
-        assert "STRUCT<>" not in ddl
-
-    def test_unsupported_type_inside_struct_column_still_raises(self):
-        with pytest.raises(exc.CompileError, match="not supported"):
-            self._ddl(Column("payload", AthenaStruct(("when", types.Time))))
-
-    def test_scalar_and_float_column_ddl_is_unchanged(self):
-        ddl = self._ddl(
-            Column("id", Integer),
-            Column("label", String),
-            Column("flag", types.Boolean),
-            Column("ratio", Float),
-            Column("ratio_prec", Float(24)),
-            Column("real_value", types.REAL),
-            Column("float_value", types.FLOAT),
-            Column("wide", types.Double),
-            Column("amount", Numeric(10, 2)),
-        )
-        assert "id INT" in ddl
-        assert "label STRING" in ddl
-        assert "flag BOOLEAN" in ddl
-        assert "ratio FLOAT" in ddl
-        assert "ratio_prec FLOAT" in ddl
-        assert "real_value FLOAT" in ddl
-        assert "float_value FLOAT" in ddl
-        assert "wide DOUBLE" in ddl
-        assert "amount DECIMAL(10, 2)" in ddl
-        assert "INTEGER" not in ddl
-        assert "REAL" not in ddl
-        assert "FLOAT(" not in ddl
-
-
 class TestAthenaDDLCompiler:
-    """Compile-only (no AWS) tests for the DDL compiler's S3 Tables support.
+    """Compile-only (no AWS) tests for the DDL compiler.
+
+    Covers column type rendering in CREATE TABLE, where STRUCT and nested MAP
+    types use Hive syntax, and S3 Tables support.
 
     S3 Tables are queried by setting the connection ``catalog_name`` to
     ``s3tablescatalog/<table-bucket>`` and using the namespace as the table
@@ -886,6 +764,16 @@ class TestAthenaDDLCompiler:
             **connect_opts,
         }
         return dialect
+
+    def _ddl(self, *columns):
+        table = Table(
+            "events",
+            MetaData(schema="analytics"),
+            *columns,
+            awsathena_location="s3://bucket/events/",
+            awsathena_file_format="PARQUET",
+        )
+        return str(CreateTable(table).compile(dialect=AthenaDialect()))
 
     def test_create_table_s3tables_catalog_omits_location(self):
         table = Table(
@@ -998,3 +886,114 @@ class TestAthenaDDLCompiler:
         )
         ddl = str(CreateTable(table).compile(dialect=dialect))
         assert "LOCATION" not in ddl
+
+    def test_create_table_renders_hive_struct_syntax(self):
+        ddl = self._ddl(
+            Column("id", Integer),
+            Column("scores", AthenaArray(Integer)),
+            Column(
+                "profile",
+                AthenaStruct(
+                    ("name", String),
+                    ("age", Integer),
+                    ("ratio", Float(24)),
+                    ("address", AthenaStruct(("city", String), ("zip", Integer))),
+                ),
+            ),
+            Column(
+                "labels",
+                AthenaMap(String, AthenaStruct(("value", String), ("count", Integer))),
+            ),
+            Column(
+                "nested_maps",
+                AthenaMap(String, AthenaMap(Integer, AthenaStruct(("n", Integer)))),
+            ),
+            Column(
+                "mixed",
+                AthenaStruct(
+                    ("tags", AthenaArray(String)),
+                    ("attrs", AthenaMap(String, Integer)),
+                    ("scores", AthenaArray(Integer)),
+                ),
+            ),
+            Column(
+                "deep",
+                AthenaArray(
+                    AthenaMap(String, AthenaStruct(("value", String), ("flag", types.Boolean)))
+                ),
+            ),
+        )
+        assert "id INT" in ddl
+        assert "scores ARRAY<INT>" in ddl
+        assert (
+            "profile STRUCT<name:STRING, age:INT, ratio:FLOAT, "
+            "address:STRUCT<city:STRING, zip:INT>>"
+        ) in ddl
+        assert "labels MAP<STRING, STRUCT<value:STRING, count:INT>>" in ddl
+        assert "nested_maps MAP<STRING, MAP<INT, STRUCT<n:INT>>>" in ddl
+        assert (
+            "mixed STRUCT<tags:ARRAY<STRING>, attrs:MAP<STRING, INT>, scores:ARRAY<INT>>"
+        ) in ddl
+        assert "deep ARRAY<MAP<STRING, STRUCT<value:STRING, flag:BOOLEAN>>>" in ddl
+        assert "ROW(" not in ddl
+        assert "INTEGER" not in ddl
+        assert "REAL" not in ddl
+        assert "FLOAT(" not in ddl
+
+    def test_struct_field_quoting_follows_ddl_preparer(self):
+        struct_type = AthenaStruct(
+            ("date", String),
+            ("select", Integer),
+            ('na"me', String),
+            ("a`b", String),
+            ("first name", String),
+            ("_hidden", Integer),
+        )
+        ddl = self._ddl(Column("payload", struct_type))
+        assert (
+            'payload STRUCT<`date`:STRING, `select`:INT, `na"me`:STRING, '
+            "`a``b`:STRING, `first name`:STRING, `_hidden`:INT>"
+        ) in ddl
+        cast_sql = str(cast(column("payload"), struct_type).compile(dialect=AthenaDialect()))
+        assert cast_sql == (
+            'CAST(payload AS ROW(date VARCHAR, "select" INTEGER, "na""me" VARCHAR, '
+            '"a`b" VARCHAR, "first name" VARCHAR, _hidden INTEGER))'
+        )
+
+    def test_empty_struct_column_stays_row(self):
+        ddl = self._ddl(
+            Column("empty", AthenaStruct()),
+            Column("filled", AthenaStruct(("n", Integer))),
+        )
+        assert "empty ROW()" in ddl
+        assert "filled STRUCT<n:INT>" in ddl
+        assert "STRUCT<>" not in ddl
+
+    def test_unsupported_type_inside_struct_column_still_raises(self):
+        with pytest.raises(exc.CompileError, match="not supported"):
+            self._ddl(Column("payload", AthenaStruct(("when", types.Time))))
+
+    def test_scalar_and_float_column_ddl_is_unchanged(self):
+        ddl = self._ddl(
+            Column("id", Integer),
+            Column("label", String),
+            Column("flag", types.Boolean),
+            Column("ratio", Float),
+            Column("ratio_prec", Float(24)),
+            Column("real_value", types.REAL),
+            Column("float_value", types.FLOAT),
+            Column("wide", types.Double),
+            Column("amount", Numeric(10, 2)),
+        )
+        assert "id INT" in ddl
+        assert "label STRING" in ddl
+        assert "flag BOOLEAN" in ddl
+        assert "ratio FLOAT" in ddl
+        assert "ratio_prec FLOAT" in ddl
+        assert "real_value FLOAT" in ddl
+        assert "float_value FLOAT" in ddl
+        assert "wide DOUBLE" in ddl
+        assert "amount DECIMAL(10, 2)" in ddl
+        assert "INTEGER" not in ddl
+        assert "REAL" not in ddl
+        assert "FLOAT(" not in ddl
