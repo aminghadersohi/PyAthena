@@ -244,11 +244,11 @@ class GlueMetadataClient:
         """Build the metadata Athena reports for a Glue table.
 
         Athena flattens the storage descriptor into the table parameters: the
-        location and formats are always present, the SerDe library whenever
-        the descriptor has SerDe information, and SerDe parameters with a
-        ``serde.param.`` prefix. The Glue description is not the table comment.
-        Glue keeps an Iceberg table's dropped and renamed columns, marked as
-        not current, which Athena leaves out.
+        location, formats, and SerDe library whenever they are set (an empty
+        string included), and SerDe parameters with a ``serde.param.`` prefix.
+        The Glue description is not the table comment. Glue keeps an Iceberg
+        table's dropped and renamed columns, marked as not current, which
+        Athena leaves out.
 
         Args:
             table: A ``Table`` from a Glue ``GetTable`` or ``GetTables`` response.
@@ -257,16 +257,18 @@ class GlueMetadataClient:
             The table's metadata as Athena reports it.
         """
         descriptor = table.get("StorageDescriptor") or {}
+        serde = descriptor.get("SerdeInfo") or {}
+        storage = {
+            "location": descriptor.get("Location"),
+            "inputformat": descriptor.get("InputFormat"),
+            "outputformat": descriptor.get("OutputFormat"),
+            "serde.serialization.lib": serde.get("SerializationLibrary"),
+        }
         parameters = dict(table.get("Parameters") or {})
-        parameters["location"] = descriptor.get("Location")
-        parameters["inputformat"] = descriptor.get("InputFormat")
-        parameters["outputformat"] = descriptor.get("OutputFormat")
-        if "SerdeInfo" in descriptor:
-            serde = descriptor["SerdeInfo"]
-            parameters["serde.serialization.lib"] = serde.get("SerializationLibrary")
-            parameters.update(
-                {f"serde.param.{k}": v for k, v in (serde.get("Parameters") or {}).items()}
-            )
+        parameters.update({k: v for k, v in storage.items() if v is not None})
+        parameters.update(
+            {f"serde.param.{k}": v for k, v in (serde.get("Parameters") or {}).items()}
+        )
 
         def column(c: Mapping[str, Any]) -> dict[str, Any]:
             return {k: c[k] for k in ("Name", "Type", "Comment") if k in c}
