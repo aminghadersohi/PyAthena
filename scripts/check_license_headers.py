@@ -18,13 +18,9 @@ import os
 import re
 import subprocess
 import sys
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:
-    import tomli as tomllib
 
 HEADER_LINES = (
     r"Copyright \d{4} The PyAthena authors",

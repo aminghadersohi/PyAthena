@@ -41,7 +41,7 @@ import logging
 import os
 import re
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import boto3
@@ -75,7 +75,7 @@ def sweep_databases(client: Any, catalog_id: str, *, dry_run: bool = True) -> di
     Databases younger than seven days are retained, including concurrent CI runs.
     Only Glue metadata is deleted; S3 objects and child catalogs are untouched.
     """
-    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+    cutoff = datetime.now(UTC) - timedelta(days=7)
     # Finish pagination before deleting anything from the catalog.
     candidates = [
         database
@@ -141,7 +141,7 @@ def sweep_s3tables_namespaces(
     Returns:
         The numbers of eligible, deleted and skipped namespaces.
     """
-    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+    cutoff = datetime.now(UTC) - timedelta(days=7)
     # Finish pagination before deleting anything from the table bucket.
     candidates = [
         namespace
