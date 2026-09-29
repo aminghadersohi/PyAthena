@@ -5,7 +5,7 @@ import sys
 import time
 from abc import ABCMeta, abstractmethod
 from collections.abc import Callable
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from botocore.exceptions import BotoCoreError, ClientError
@@ -932,7 +932,7 @@ class BaseCursor(metaclass=ABCMeta):
         if cache_size == 0 and cache_expiration_time > 0:
             cache_size = sys.maxsize
         if cache_expiration_time > 0:
-            expiration_time = datetime.now(timezone.utc) - timedelta(seconds=cache_expiration_time)
+            expiration_time = datetime.now(UTC) - timedelta(seconds=cache_expiration_time)
             return cache_size, expiration_time
         return cache_size, None
 
@@ -973,7 +973,7 @@ class BaseCursor(metaclass=ABCMeta):
             if (
                 expiration_time
                 and execution.completion_date_time
-                and execution.completion_date_time.astimezone(timezone.utc) < expiration_time
+                and execution.completion_date_time.astimezone(UTC) < expiration_time
             ):
                 return None, True
             if (

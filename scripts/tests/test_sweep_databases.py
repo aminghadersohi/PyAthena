@@ -5,7 +5,7 @@
 #
 # SPDX-License-Identifier: MIT
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import Mock
 
 import boto3
@@ -22,7 +22,7 @@ from scripts.sweep_databases import (
 )
 
 CATALOG = "123456789012"
-OLD = datetime.now(timezone.utc) - timedelta(days=10)
+OLD = datetime.now(UTC) - timedelta(days=10)
 DATABASE = {"Name": "pyathena_test_abcdefghij", "CreateTime": OLD}
 BUCKET_ARN = f"arn:aws:s3tables:us-west-2:{CATALOG}:bucket/table-bucket"
 NAMESPACE = {
@@ -109,7 +109,7 @@ def test_preview_and_apply_finish_pagination_before_mutating(glue):
     "current",
     [
         {**DATABASE, "CreateTime": OLD - timedelta(days=1)},
-        {**DATABASE, "CreateTime": datetime.now(timezone.utc)},
+        {**DATABASE, "CreateTime": datetime.now(UTC)},
         {**DATABASE, "TargetDatabase": {"CatalogId": CATALOG, "DatabaseName": "shared"}},
     ],
 )
@@ -283,7 +283,7 @@ def test_namespace_sweep_deletes_tables_then_namespace(s3tables):
 @pytest.mark.parametrize(
     "current",
     [
-        {**NAMESPACE, "createdAt": datetime.now(timezone.utc)},
+        {**NAMESPACE, "createdAt": datetime.now(UTC)},
         RECREATED,
     ],
 )

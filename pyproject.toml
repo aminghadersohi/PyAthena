@@ -14,7 +14,7 @@ dependencies = [
     "fsspec",
     "python-dateutil",
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE", "NOTICE"]
@@ -24,7 +24,6 @@ classifiers = [
     "Operating System :: OS Independent",
     "Topic :: Database :: Front-Ends",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -94,7 +93,6 @@ dev = [
     "sphinx-design",
     "types-python-dateutil",
     "cfn-lint>=1",
-    "tomli>=2.0.0; python_version<'3.11'",
 ]
 
 [build-system]
@@ -142,7 +140,7 @@ exclude = [
     ".tox",
     "benchmarks",
 ]
-target-version = "py310"
+target-version = "py311"
 
 [tool.ruff.lint]
 # https://docs.astral.sh/ruff/rules/
@@ -208,11 +206,10 @@ exclude = [
 legacy_tox_ini = """
 [tox]
 isolated_build = true
-envlist = py{310,311,312,313,314}-{pyathena,sqla,sqla_async}
+envlist = py{311,312,313,314}-{pyathena,sqla,sqla_async}
 
 [gh-actions]
 python =
-    3.10: py310
     3.11: py311
     3.12: py312
     3.13: py313

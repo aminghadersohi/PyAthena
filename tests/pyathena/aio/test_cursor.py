@@ -1,7 +1,7 @@
 import asyncio
 import re
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
@@ -171,7 +171,7 @@ class TestAioCursor:
                         "QueryExecutionContext": {"Database": schema},
                         "Status": {
                             "State": AthenaQueryExecution.STATE_SUCCEEDED,
-                            "CompletionDateTime": datetime.now(timezone.utc),
+                            "CompletionDateTime": datetime.now(UTC),
                         },
                     }
                 }
@@ -208,7 +208,7 @@ class TestAioCursor:
                         "QueryExecutionContext": {"Database": schema, "Catalog": catalog},
                         "Status": {
                             "State": AthenaQueryExecution.STATE_SUCCEEDED,
-                            "CompletionDateTime": datetime.now(timezone.utc),
+                            "CompletionDateTime": datetime.now(UTC),
                         },
                     }
                 }
@@ -235,7 +235,7 @@ class TestAioCursor:
 
     async def test_cache_search_stops_at_expired_execution(self, caplog):
         query = "SELECT * FROM one_row"
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         cursor = AioCursor.__new__(AioCursor)
         cursor._schema_name = "this_schema"
         cursor._catalog_name = None
@@ -264,7 +264,7 @@ class TestAioCursor:
 
     async def test_cache_search_reads_pages_up_to_cache_size(self):
         query = "SELECT * FROM one_row"
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         cursor = AioCursor.__new__(AioCursor)
         cursor._schema_name = "this_schema"
         cursor._catalog_name = None
@@ -284,7 +284,7 @@ class TestAioCursor:
 
     async def test_cache_search_prefers_latest_execution(self):
         query = "SELECT * FROM one_row"
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         cursor = AioCursor.__new__(AioCursor)
         cursor._schema_name = "this_schema"
         cursor._catalog_name = None

@@ -9,7 +9,7 @@ import time
 import uuid
 from concurrent import futures
 from concurrent.futures.thread import ThreadPoolExecutor
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from random import randint
 from unittest.mock import MagicMock, call, patch
@@ -100,7 +100,7 @@ class TestCursor:
     def test_cache_size(self, cursor):
         # To test caching, we need to make sure the query is unique, otherwise
         # we might accidentally pick up the cache results from another CI run.
-        query = f"SELECT * FROM one_row -- {datetime.now(timezone.utc)!s}"
+        query = f"SELECT * FROM one_row -- {datetime.now(UTC)!s}"
 
         cursor.execute(query)
         first_query_id = cursor.query_id
@@ -119,7 +119,7 @@ class TestCursor:
 
     @pytest.mark.parametrize("cursor", [{"work_group": ENV.work_group}], indirect=["cursor"])
     def test_cache_size_with_work_group(self, cursor):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         cursor.execute("SELECT %(now)s as date", {"now": now})
         first_query_id = cursor.query_id
 
@@ -133,7 +133,7 @@ class TestCursor:
         assert third_query_id in [first_query_id, second_query_id]
 
     def test_cache_expiration_time(self, cursor):
-        query = f"SELECT * FROM one_row -- {datetime.now(timezone.utc)!s}"
+        query = f"SELECT * FROM one_row -- {datetime.now(UTC)!s}"
 
         cursor.execute(query)
         query_id_1 = cursor.query_id
@@ -150,7 +150,7 @@ class TestCursor:
     @pytest.mark.parametrize("cursor", [{"work_group": ENV.work_group}], indirect=["cursor"])
     def test_cache_expiration_time_with_cache_size(self, cursor):
         # Cache miss
-        query = f"SELECT * FROM one_row -- {datetime.now(timezone.utc)!s}"
+        query = f"SELECT * FROM one_row -- {datetime.now(UTC)!s}"
 
         cursor.execute(query)
         query_id_1 = cursor.query_id
@@ -167,7 +167,7 @@ class TestCursor:
         assert query_id_3 not in [query_id_1, query_id_2]
 
         # Cache miss
-        query = f"SELECT * FROM one_row -- {datetime.now(timezone.utc)!s}"
+        query = f"SELECT * FROM one_row -- {datetime.now(UTC)!s}"
 
         cursor.execute(query)
         query_id_4 = cursor.query_id
@@ -176,7 +176,7 @@ class TestCursor:
         query_id_5 = cursor.query_id
 
         for _ in range(5):
-            cursor.execute("SELECT %(now)s as date", {"now": datetime.now(timezone.utc)})
+            cursor.execute("SELECT %(now)s as date", {"now": datetime.now(UTC)})
 
         cursor.execute(query, cache_size=1, cache_expiration_time=3600)  # 1 hours
         query_id_6 = cursor.query_id
@@ -185,7 +185,7 @@ class TestCursor:
         assert query_id_6 not in [query_id_4, query_id_5]
 
         # Cache hit
-        query = f"SELECT * FROM one_row -- {datetime.now(timezone.utc)!s}"
+        query = f"SELECT * FROM one_row -- {datetime.now(UTC)!s}"
 
         cursor.execute(query)
         query_id_7 = cursor.query_id
@@ -195,7 +195,7 @@ class TestCursor:
 
         time.sleep(2)
         for _ in range(5):
-            cursor.execute("SELECT %(now)s as date", {"now": datetime.now(timezone.utc)})
+            cursor.execute("SELECT %(now)s as date", {"now": datetime.now(UTC)})
 
         cursor.execute(query, cache_size=1000, cache_expiration_time=3600)  # 1 hours
         query_id_9 = cursor.query_id
@@ -221,7 +221,7 @@ class TestCursor:
                         "QueryExecutionContext": {"Database": schema},
                         "Status": {
                             "State": AthenaQueryExecution.STATE_SUCCEEDED,
-                            "CompletionDateTime": datetime.now(timezone.utc),
+                            "CompletionDateTime": datetime.now(UTC),
                         },
                     }
                 }
@@ -255,7 +255,7 @@ class TestCursor:
                         "QueryExecutionContext": {"Database": schema, "Catalog": catalog},
                         "Status": {
                             "State": AthenaQueryExecution.STATE_SUCCEEDED,
-                            "CompletionDateTime": datetime.now(timezone.utc),
+                            "CompletionDateTime": datetime.now(UTC),
                         },
                     }
                 }
@@ -279,7 +279,7 @@ class TestCursor:
 
     def test_cache_search_stops_at_expired_execution(self, caplog):
         query = "SELECT * FROM one_row"
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         cursor = Cursor.__new__(Cursor)
         cursor._schema_name = "this_schema"
         cursor._catalog_name = None
@@ -302,7 +302,7 @@ class TestCursor:
 
     def test_cache_search_reads_pages_up_to_cache_size(self):
         query = "SELECT * FROM one_row"
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         cursor = Cursor.__new__(Cursor)
         cursor._schema_name = "this_schema"
         cursor._catalog_name = None
@@ -320,7 +320,7 @@ class TestCursor:
 
     def test_cache_search_prefers_latest_execution(self):
         query = "SELECT * FROM one_row"
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         cursor = Cursor.__new__(Cursor)
         cursor._schema_name = "this_schema"
         cursor._catalog_name = None
@@ -338,7 +338,7 @@ class TestCursor:
         indirect=["cursor"],
     )
     def test_cursor_query_result_reuse(self, cursor):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         cursor.execute("SELECT %(now)s as date", {"now": now})
         assert not cursor.reused_previous_result
         assert cursor.result_reuse_enabled
@@ -350,7 +350,7 @@ class TestCursor:
 
     @pytest.mark.parametrize("cursor", [{"work_group": ENV.work_group}], indirect=["cursor"])
     def test_execute_query_result_reuse(self, cursor):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         cursor.execute(
             "SELECT %(now)s as date", {"now": now}, result_reuse_enable=True, result_reuse_minutes=5
         )
@@ -716,7 +716,7 @@ class TestCursor:
                 "a string",
                 "varchar",
                 datetime(2017, 1, 1, 0, 0, 0),
-                datetime(2017, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
+                datetime(2017, 1, 1, 0, 0, 0, tzinfo=UTC),
                 datetime(2017, 1, 1, 0, 0, 0).time(),
                 date(2017, 1, 2),
                 b"123",

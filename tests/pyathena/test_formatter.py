@@ -6,7 +6,7 @@
 # SPDX-License-Identifier: MIT
 
 import textwrap
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
@@ -164,7 +164,7 @@ class TestDefaultParameterFormatter:
             (datetime(2017, 1, 1, 12, 0, 0, 396), "TIMESTAMP '2017-01-01 12:00:00.000396'"),
             (datetime(5, 1, 1), "TIMESTAMP '0005-01-01 00:00:00.000'"),
             (
-                datetime(2017, 1, 1, 12, 0, 0, tzinfo=timezone.utc),
+                datetime(2017, 1, 1, 12, 0, 0, tzinfo=UTC),
                 "TIMESTAMP '2017-01-01 12:00:00.000'",
             ),
             (date(5, 1, 1), "DATE '0005-01-01'"),

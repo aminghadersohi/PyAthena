@@ -8,7 +8,7 @@ from abc import ABCMeta, abstractmethod
 from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any, Literal
 
@@ -140,7 +140,7 @@ class Formatter(metaclass=ABCMeta):
 
         operation_upper = operation.strip().upper()
         if operation_upper.startswith(("SELECT", "WITH")):
-            now = datetime.now(timezone.utc).strftime("%Y%m%d")
+            now = datetime.now(UTC).strftime("%Y%m%d")
             location = f"{s3_staging_dir}unload/{now}/{uuid.uuid4()!s}/"
             operation = textwrap.dedent(
                 f"""
