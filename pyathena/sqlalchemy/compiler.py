@@ -1182,7 +1182,7 @@ class AthenaDDLCompiler(DDLCompiler):
             type_ = "INT"
         else:
             # type_expression marks column DDL so STRUCT and MAP use Hive syntax.
-            type_ = self.dialect.type_compiler.process(column.type, type_expression=column)
+            type_ = self.dialect.type_compiler_instance.process(column.type, type_expression=column)
         text = [f"{self.preparer.format_column(column)} {type_}"]
         if column.comment:
             text.append(f"{self._get_comment_specification(column.comment)}")
