@@ -8,12 +8,13 @@ from re import Pattern
 from typing import (
     TYPE_CHECKING,
     Any,
+    ClassVar,
     cast,
 )
 
 from sqlalchemy import exc, schema, types, util
 from sqlalchemy.engine import Engine, reflection
-from sqlalchemy.engine.default import DefaultDialect
+from sqlalchemy.engine.default import DefaultDialect, DefaultExecutionContext
 from sqlalchemy.engine.interfaces import ExecutionContext
 from sqlalchemy.sql.compiler import (
     DDLCompiler,
@@ -38,7 +39,6 @@ from pyathena.sqlalchemy.types import (
     AthenaMap,
     AthenaStruct,
     AthenaTimestamp,
-    get_double_type,
 )
 from pyathena.sqlalchemy.util import _HashableDict, _split_type_arguments
 from pyathena.util import (
@@ -71,7 +71,7 @@ _logger = logging.getLogger(__name__)
 ischema_names: dict[str, type[Any]] = {
     "boolean": types.BOOLEAN,
     "float": types.FLOAT,
-    "double": get_double_type(),
+    "double": types.DOUBLE,
     "real": types.FLOAT,
     "tinyint": TINYINT,
     "smallint": types.SMALLINT,
@@ -144,7 +144,7 @@ class AthenaDialect(DefaultDialect):
     preparer: type[IdentifierPreparer] = AthenaDMLIdentifierPreparer
     statement_compiler: type[SQLCompiler] = AthenaStatementCompiler
     ddl_compiler: type[DDLCompiler] = AthenaDDLCompiler
-    type_compiler: type[GenericTypeCompiler] = AthenaTypeCompiler
+    type_compiler_cls: ClassVar[type[GenericTypeCompiler]] = AthenaTypeCompiler
     default_paramstyle: str = pyathena.paramstyle
     max_identifier_length: int = 255
     cte_follows_insert: bool = True
@@ -153,6 +153,20 @@ class AthenaDialect(DefaultDialect):
     supports_default_values: bool = False
     supports_empty_insert: bool = False
     supports_multivalues_insert: bool = True
+    # Render executemany inserts as multi-row INSERT statements. Athena has no
+    # RETURNING, so batching must also apply to inserts without it. The page
+    # size keeps typical rows well below Athena's 262,144-byte query limit.
+    use_insertmanyvalues: bool = True
+    use_insertmanyvalues_wo_returning: bool = True
+    insertmanyvalues_page_size: int = 100
+    # Coerce these options from engine_from_config string values.
+    engine_config_types: Mapping[str, Any] = util.immutabledict(
+        {
+            **DefaultDialect.engine_config_types,
+            "insertmanyvalues_page_size": util.asint,
+            "use_insertmanyvalues": util.asbool,
+        }
+    )
     supports_sane_rowcount: bool = True
     supports_sane_multi_rowcount: bool = True
     supports_native_decimal: bool = True
@@ -208,10 +222,18 @@ class AthenaDialect(DefaultDialect):
     # EntityNotFoundException envelope.
     _FALLBACK_ERROR_CODES: tuple[str, ...] = (*THROTTLING_ERROR_CODES, "MetadataException")
 
+    # Engine options that the connection URL query can also set.
+    _URL_ENGINE_OPTIONS: tuple[str, ...] = ("insertmanyvalues_page_size", "use_insertmanyvalues")
+
     def __init__(self, json_deserializer=None, json_serializer=None, **kwargs):
         DefaultDialect.__init__(self, **kwargs)
         self._json_deserializer = json_deserializer
         self._json_serializer = json_serializer
+        # create_engine passes only the options its caller gave; those take
+        # precedence over the same options in the URL query.
+        self._explicit_engine_options = frozenset(
+            name for name in self._URL_ENGINE_OPTIONS if name in kwargs
+        )
 
     @classmethod
     def import_dbapi(cls) -> ModuleType:
@@ -237,7 +259,10 @@ class AthenaDialect(DefaultDialect):
         """Build ``pyathena.connect()`` arguments from a SQLAlchemy URL.
 
         Query parameters are passed through, with the known boolean, integer
-        and float options converted from their string form.
+        and float options converted from their string form. The
+        ``insertmanyvalues_page_size`` and ``use_insertmanyvalues`` parameters
+        configure this dialect instead and are not passed through; the same
+        options given to ``create_engine`` take precedence.
 
         Args:
             url: The SQLAlchemy URL.
@@ -274,6 +299,20 @@ class AthenaDialect(DefaultDialect):
             opts.update({"glue_metadata_fallback": bool(strtobool(opts["glue_metadata_fallback"]))})
         if "result_reuse_minutes" in opts:
             opts.update({"result_reuse_minutes": int(opts["result_reuse_minutes"])})
+        # Remove these URL options even when an explicit create_engine value
+        # overrides them, and parse them only when they apply.
+        page_size = opts.pop("insertmanyvalues_page_size", None)
+        if (
+            page_size is not None
+            and "insertmanyvalues_page_size" not in self._explicit_engine_options
+        ):
+            self.insertmanyvalues_page_size = int(page_size)
+        use_insertmanyvalues = opts.pop("use_insertmanyvalues", None)
+        if (
+            use_insertmanyvalues is not None
+            and "use_insertmanyvalues" not in self._explicit_engine_options
+        ):
+            self.use_insertmanyvalues = bool(strtobool(use_insertmanyvalues))
         # Store on the dialect so compilers can consult connection options
         # (e.g. catalog_name for S3 Tables detection). Assigned here rather than
         # in create_connect_args because subclass dialects call this method
@@ -392,11 +431,14 @@ class AthenaDialect(DefaultDialect):
         # information_schema at once instead of waiting out the retry policy; the
         # query answers existence and columns, while table comments and options
         # still need the API. Other retryable codes keep the connection's policy.
-        # Connection.cursor() applies cursor_kwargs last, so a retry_config given
-        # there still runs its own retries before the fallback.
-        retry_config = self._without_fallback_retries(
-            raw_connection.retry_config  # type: ignore[union-attr]
-        )
+        # A retry_config given in cursor_kwargs replaces that policy entirely, so
+        # its own retries still run before the fallback.
+        if "retry_config" in raw_connection.cursor_kwargs:
+            retry_config = raw_connection.cursor_kwargs["retry_config"]
+        else:
+            retry_config = self._without_fallback_retries(
+                raw_connection.retry_config  # type: ignore[union-attr]
+            )
         with raw_connection.driver_connection.cursor(  # type: ignore[union-attr]
             retry_config=retry_config
         ) as cursor:
@@ -511,15 +553,12 @@ class AthenaDialect(DefaultDialect):
             )
             rows = cursor.fetchall()
         # Sort here: the query has no ORDER BY, so its result order is Athena's.
-        # The comment is still normalized at this boundary: a converter given in
-        # cursor_kwargs is applied after the one _internal_cursor() pins, and one
-        # written for a DataFrame cursor reports a missing value as NaN.
         return [
             self._column(
                 column_name,
                 # Athena exposes Hive STRING as unbounded VARCHAR in information_schema.
                 "string" if data_type == "varchar" else data_type,
-                comment if isinstance(comment, str) else None,
+                comment,
                 extra_info == "partition key" or None,
             )
             for _, column_name, data_type, comment, extra_info in sorted(
@@ -708,6 +747,19 @@ class AthenaDialect(DefaultDialect):
         return []  # pragma: no cover
 
     def do_execute(self, cursor, statement, parameters, context=None):
+        """Execute a statement with the DB API cursor.
+
+        SQLAlchemy calls this once per page of an "insertmanyvalues" insert.
+        For those pages, the execution context's row count accumulates the
+        cursor row counts, so that ``CursorResult.rowcount`` reports the total
+        like ``Cursor.executemany``, or -1 if any page has an unknown count.
+
+        Args:
+            cursor: The DB API cursor.
+            statement: The SQL statement.
+            parameters: The statement parameters.
+            context: The SQLAlchemy execution context, if any.
+        """
         on_start_query_execution = None
         if isinstance(context, ExecutionContext):
             execution_options = context.execution_options
@@ -718,6 +770,16 @@ class AthenaDialect(DefaultDialect):
             cursor.execute(statement, parameters, on_start_query_execution=on_start_query_execution)
         else:
             cursor.execute(statement, parameters)
+
+        # An executemany context reaches do_execute only for insertmanyvalues
+        # pages; other executemany statements go through do_executemany.
+        if isinstance(context, DefaultExecutionContext) and context.executemany:
+            total = context._rowcount
+            count = cursor.rowcount
+            if total is None:
+                context._rowcount = count
+            else:
+                context._rowcount = total + count if total >= 0 and count >= 0 else -1
 
     def do_rollback(self, dbapi_connection: PoolProxiedConnection) -> None:
         # No transactions for Athena

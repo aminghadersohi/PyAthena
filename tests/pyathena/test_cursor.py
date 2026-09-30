@@ -6,12 +6,13 @@ import re
 import string
 import threading
 import time
+import uuid
 from concurrent import futures
 from concurrent.futures.thread import ThreadPoolExecutor
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from random import randint
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 from botocore.exceptions import ClientError
@@ -35,7 +36,7 @@ from pyathena.model import AthenaQueryExecution
 from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.conftest import connect
-from tests.pyathena.util import throttle_metadata_api, unreachable_glue
+from tests.pyathena.util import succeeded_query_execution, throttle_metadata_api, unreachable_glue
 
 _logger = logging.getLogger(__name__)
 
@@ -99,7 +100,7 @@ class TestCursor:
     def test_cache_size(self, cursor):
         # To test caching, we need to make sure the query is unique, otherwise
         # we might accidentally pick up the cache results from another CI run.
-        query = f"SELECT * FROM one_row -- {datetime.now(timezone.utc)!s}"
+        query = f"SELECT * FROM one_row -- {datetime.now(UTC)!s}"
 
         cursor.execute(query)
         first_query_id = cursor.query_id
@@ -118,7 +119,7 @@ class TestCursor:
 
     @pytest.mark.parametrize("cursor", [{"work_group": ENV.work_group}], indirect=["cursor"])
     def test_cache_size_with_work_group(self, cursor):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         cursor.execute("SELECT %(now)s as date", {"now": now})
         first_query_id = cursor.query_id
 
@@ -132,7 +133,7 @@ class TestCursor:
         assert third_query_id in [first_query_id, second_query_id]
 
     def test_cache_expiration_time(self, cursor):
-        query = f"SELECT * FROM one_row -- {datetime.now(timezone.utc)!s}"
+        query = f"SELECT * FROM one_row -- {datetime.now(UTC)!s}"
 
         cursor.execute(query)
         query_id_1 = cursor.query_id
@@ -149,7 +150,7 @@ class TestCursor:
     @pytest.mark.parametrize("cursor", [{"work_group": ENV.work_group}], indirect=["cursor"])
     def test_cache_expiration_time_with_cache_size(self, cursor):
         # Cache miss
-        query = f"SELECT * FROM one_row -- {datetime.now(timezone.utc)!s}"
+        query = f"SELECT * FROM one_row -- {datetime.now(UTC)!s}"
 
         cursor.execute(query)
         query_id_1 = cursor.query_id
@@ -166,7 +167,7 @@ class TestCursor:
         assert query_id_3 not in [query_id_1, query_id_2]
 
         # Cache miss
-        query = f"SELECT * FROM one_row -- {datetime.now(timezone.utc)!s}"
+        query = f"SELECT * FROM one_row -- {datetime.now(UTC)!s}"
 
         cursor.execute(query)
         query_id_4 = cursor.query_id
@@ -175,7 +176,7 @@ class TestCursor:
         query_id_5 = cursor.query_id
 
         for _ in range(5):
-            cursor.execute("SELECT %(now)s as date", {"now": datetime.now(timezone.utc)})
+            cursor.execute("SELECT %(now)s as date", {"now": datetime.now(UTC)})
 
         cursor.execute(query, cache_size=1, cache_expiration_time=3600)  # 1 hours
         query_id_6 = cursor.query_id
@@ -184,7 +185,7 @@ class TestCursor:
         assert query_id_6 not in [query_id_4, query_id_5]
 
         # Cache hit
-        query = f"SELECT * FROM one_row -- {datetime.now(timezone.utc)!s}"
+        query = f"SELECT * FROM one_row -- {datetime.now(UTC)!s}"
 
         cursor.execute(query)
         query_id_7 = cursor.query_id
@@ -194,7 +195,7 @@ class TestCursor:
 
         time.sleep(2)
         for _ in range(5):
-            cursor.execute("SELECT %(now)s as date", {"now": datetime.now(timezone.utc)})
+            cursor.execute("SELECT %(now)s as date", {"now": datetime.now(UTC)})
 
         cursor.execute(query, cache_size=1000, cache_expiration_time=3600)  # 1 hours
         query_id_9 = cursor.query_id
@@ -220,7 +221,7 @@ class TestCursor:
                         "QueryExecutionContext": {"Database": schema},
                         "Status": {
                             "State": AthenaQueryExecution.STATE_SUCCEEDED,
-                            "CompletionDateTime": datetime.now(timezone.utc),
+                            "CompletionDateTime": datetime.now(UTC),
                         },
                     }
                 }
@@ -254,7 +255,7 @@ class TestCursor:
                         "QueryExecutionContext": {"Database": schema, "Catalog": catalog},
                         "Status": {
                             "State": AthenaQueryExecution.STATE_SUCCEEDED,
-                            "CompletionDateTime": datetime.now(timezone.utc),
+                            "CompletionDateTime": datetime.now(UTC),
                         },
                     }
                 }
@@ -276,13 +277,68 @@ class TestCursor:
                 == "query_id_awsdatacatalog"
             )
 
+    def test_cache_search_stops_at_expired_execution(self, caplog):
+        query = "SELECT * FROM one_row"
+        now = datetime.now(UTC)
+        cursor = Cursor.__new__(Cursor)
+        cursor._schema_name = "this_schema"
+        cursor._catalog_name = None
+        page = [
+            succeeded_query_execution("expired", query, now - timedelta(hours=2)),
+            succeeded_query_execution("other", "SELECT 1", now),
+        ]
+
+        # A page read after the expired execution would return this match.
+        next_page = (None, [succeeded_query_execution("next_page", query, now)])
+
+        with patch.object(
+            Cursor, "_list_query_executions", side_effect=[("next_token", page), next_page]
+        ) as list_mock:
+            # Without cache_size, cache_expiration_time alone bounds the search.
+            assert cursor._find_previous_query_id(query, None, cache_expiration_time=3600) is None
+        list_mock.assert_called_once_with(None, next_token=None, max_results=50)
+        # A failed search also returns None; the expiry must stop it without an error.
+        assert "Failed to check the cache" not in caplog.text
+
+    def test_cache_search_reads_pages_up_to_cache_size(self):
+        query = "SELECT * FROM one_row"
+        now = datetime.now(UTC)
+        cursor = Cursor.__new__(Cursor)
+        cursor._schema_name = "this_schema"
+        cursor._catalog_name = None
+        pages = [
+            ("next_token", [succeeded_query_execution("other", "SELECT 1", now)]),
+            ("last_token", [succeeded_query_execution("match", query, now)]),
+        ]
+
+        with patch.object(Cursor, "_list_query_executions", side_effect=pages) as list_mock:
+            assert cursor._find_previous_query_id(query, "wg", cache_size=60) == "match"
+        assert list_mock.call_args_list == [
+            call("wg", next_token=None, max_results=50),
+            call("wg", next_token="next_token", max_results=10),
+        ]
+
+    def test_cache_search_prefers_latest_execution(self):
+        query = "SELECT * FROM one_row"
+        now = datetime.now(UTC)
+        cursor = Cursor.__new__(Cursor)
+        cursor._schema_name = "this_schema"
+        cursor._catalog_name = None
+        page = [
+            succeeded_query_execution("older", query, now - timedelta(minutes=1)),
+            succeeded_query_execution("latest", query, now),
+        ]
+
+        with patch.object(Cursor, "_list_query_executions", return_value=(None, page)):
+            assert cursor._find_previous_query_id(query, None, cache_size=10) == "latest"
+
     @pytest.mark.parametrize(
         "cursor",
         [{"work_group": ENV.work_group, "result_reuse_enable": True, "result_reuse_minutes": 5}],
         indirect=["cursor"],
     )
     def test_cursor_query_result_reuse(self, cursor):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         cursor.execute("SELECT %(now)s as date", {"now": now})
         assert not cursor.reused_previous_result
         assert cursor.result_reuse_enabled
@@ -294,7 +350,7 @@ class TestCursor:
 
     @pytest.mark.parametrize("cursor", [{"work_group": ENV.work_group}], indirect=["cursor"])
     def test_execute_query_result_reuse(self, cursor):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         cursor.execute(
             "SELECT %(now)s as date", {"now": now}, result_reuse_enable=True, result_reuse_minutes=5
         )
@@ -660,7 +716,7 @@ class TestCursor:
                 "a string",
                 "varchar",
                 datetime(2017, 1, 1, 0, 0, 0),
-                datetime(2017, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
+                datetime(2017, 1, 1, 0, 0, 0, tzinfo=UTC),
                 datetime(2017, 1, 1, 0, 0, 0).time(),
                 date(2017, 1, 2),
                 b"123",
@@ -819,17 +875,29 @@ class TestCursor:
         conn.close()
 
     def test_show_partition(self, cursor):
-        location = f"{ENV.s3_staging_dir}{ENV.schema}/partition_table/"
-        for i in range(10):
+        table_name = f"partition_{uuid.uuid4().hex}"
+        table = f"{ENV.schema}.{table_name}"
+        location = f"{ENV.s3_staging_dir}{ENV.schema}/{table_name}/"
+        try:
             cursor.execute(
+                f"""
+                CREATE EXTERNAL TABLE {table} (a STRING)
+                PARTITIONED BY (b INT)
+                LOCATION '{location}'
                 """
-                ALTER TABLE partition_table ADD PARTITION (b=%(b)d)
-                LOCATION %(location)s
-                """,
-                {"b": i, "location": location},
             )
-        cursor.execute("SHOW PARTITIONS partition_table")
-        assert sorted(cursor.fetchall()) == [(f"b={i}",) for i in range(10)]
+            for i in range(10):
+                cursor.execute(
+                    f"""
+                    ALTER TABLE {table} ADD PARTITION (b=%(b)d)
+                    LOCATION %(location)s
+                    """,
+                    {"b": i, "location": location},
+                )
+            cursor.execute(f"SHOW PARTITIONS {table}")
+            assert sorted(cursor.fetchall()) == [(f"b={i}",) for i in range(10)]
+        finally:
+            cursor.execute(f"DROP TABLE IF EXISTS {table}")
 
     @pytest.mark.parametrize("cursor", [{"work_group": ENV.work_group}], indirect=["cursor"])
     def test_workgroup(self, cursor):
@@ -842,14 +910,14 @@ class TestCursor:
         cursor.execute("SELECT * FROM one_row")
         assert cursor.output_location
 
-    def test_executemany(self, cursor):
+    def test_executemany(self, cursor, empty_table):
         rows = [(1, "foo"), (2, "bar"), (3, "jim o'rourke")]
         cursor.executemany(
-            "INSERT INTO execute_many (a, b) VALUES (%(a)d, %(b)s)",
+            f"INSERT INTO {empty_table} (a, b) VALUES (%(a)d, %(b)s)",
             [{"a": a, "b": b} for a, b in rows],
         )
         assert cursor.rowcount == len(rows)
-        cursor.execute("SELECT * FROM execute_many")
+        cursor.execute(f"SELECT * FROM {empty_table}")
         assert sorted(cursor.fetchall()) == list(rows)
 
     @pytest.mark.parametrize(

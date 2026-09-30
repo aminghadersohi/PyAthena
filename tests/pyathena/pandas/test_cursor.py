@@ -20,11 +20,6 @@ from pyathena.pandas.result_set import AthenaPandasResultSet, PandasDataFrameIte
 from tests import ENV
 from tests.pyathena.conftest import connect
 
-# pandas 3 infers its "str" dtype for strings, which represents NULL as NaN; pandas 2 uses
-# object columns with None.
-STRING_TYPE = pd.Series(["a"]).dtype.type
-STRING_NULL = pd.Series(["a", None]).iloc[1]
-
 
 class TestPandasCursor:
     @pytest.mark.parametrize(
@@ -646,17 +641,17 @@ class TestPandasCursor:
             np.int64,
             np.float64,
             np.float64,
-            STRING_TYPE,
-            STRING_TYPE,
+            str,
+            str,
             np.datetime64,
             np.object_,
             np.datetime64,
             np.object_,
-            STRING_TYPE,
+            str,
             np.object_,
-            STRING_TYPE,
+            str,
             np.object_,
-            STRING_TYPE,
+            str,
             np.object_,
         )
         rows = [
@@ -768,8 +763,8 @@ class TestPandasCursor:
             np.int64,
             np.float32,
             np.float64,
-            STRING_TYPE,
-            STRING_TYPE,
+            str,
+            str,
             np.datetime64,
             np.object_,
             np.object_,
@@ -1136,16 +1131,13 @@ class TestPandasCursor:
         ],
         indirect=["pandas_cursor"],
     )
-    def test_executemany(self, pandas_cursor, parquet_engine):
+    def test_executemany(self, pandas_cursor, parquet_engine, empty_table):
         rows = [(1, "foo"), (2, "bar"), (3, "jim o'rourke")]
-        table_name = "execute_many_pandas" + (
-            f"_unload_{parquet_engine}" if pandas_cursor._unload else ""
-        )
         pandas_cursor.executemany(
-            f"INSERT INTO {table_name} (a, b) VALUES (%(a)d, %(b)s)",
+            f"INSERT INTO {empty_table} (a, b) VALUES (%(a)d, %(b)s)",
             [{"a": a, "b": b} for a, b in rows],
         )
-        pandas_cursor.execute(f"SELECT * FROM {table_name}", engine=parquet_engine)
+        pandas_cursor.execute(f"SELECT * FROM {empty_table}", engine=parquet_engine)
         assert sorted(pandas_cursor.fetchall()) == list(rows)
 
     @pytest.mark.parametrize(
@@ -1203,7 +1195,7 @@ class TestPandasCursor:
             # NULL and empty characters are correctly converted when the UNLOAD option is enabled.
             np.testing.assert_equal(
                 pandas_cursor.fetchall(),
-                [("", "a"), ("N/A", "a"), ("NULL", "a"), (STRING_NULL, "a")],
+                [("", "a"), ("N/A", "a"), ("NULL", "a"), (np.nan, "a")],
             )
         else:
             np.testing.assert_equal(
@@ -1215,7 +1207,7 @@ class TestPandasCursor:
             # NULL and empty characters are correctly converted when the UNLOAD option is enabled.
             np.testing.assert_equal(
                 pandas_cursor.fetchall(),
-                [("", "a"), ("N/A", "a"), ("NULL", "a"), (STRING_NULL, "a")],
+                [("", "a"), ("N/A", "a"), ("NULL", "a"), (np.nan, "a")],
             )
         else:
             assert pandas_cursor.fetchall() == [

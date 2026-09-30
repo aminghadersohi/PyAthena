@@ -213,6 +213,7 @@ PolarsCursor supports the unload option, as does {ref}`arrow-cursor`.
 See {ref}`arrow-unload-options` for more information.
 
 The unload option can be enabled by specifying it in the `cursor_kwargs` argument of the connect method or as an argument to the cursor method.
+An argument to the cursor method takes precedence over the same key in `cursor_kwargs`.
 
 ```python
 from pyathena import connect
@@ -251,6 +252,7 @@ are too large to fit in memory.
 
 The chunksize option can be enabled by specifying an integer value in the `cursor_kwargs`
 argument of the connect method or as an argument to the cursor method.
+An argument to the cursor method takes precedence over the same key in `cursor_kwargs`.
 
 ```python
 from pyathena import connect

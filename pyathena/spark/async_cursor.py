@@ -80,24 +80,48 @@ class AsyncSparkCursor(SparkBaseCursor):
         notebook_version: str | None = None,
         session_idle_timeout_minutes: int | None = None,
         max_workers: int = (cpu_count() or 1) * 5,
+        terminate_session_on_close: bool | None = None,
         **kwargs,
     ):
+        """Initialize the cursor and start or attach to a Spark session.
+
+        Args:
+            session_id: ID of an existing session to use. If omitted, a new
+                session is started.
+            description: Description of a new session.
+            engine_configuration: Engine configuration of a new session.
+            notebook_version: Notebook version of a new session.
+            session_idle_timeout_minutes: Idle timeout of a new session in minutes.
+            max_workers: Maximum number of threads for asynchronous operations.
+            terminate_session_on_close: Whether ``close()`` terminates the session.
+                If None, only a session started by this cursor is terminated;
+                a session supplied with ``session_id`` is left running.
+            **kwargs: Arguments passed to ``SparkBaseCursor``.
+
+        Raises:
+            ValueError: If ``max_workers`` is not greater than 0.
+            OperationalError: If the supplied session does not exist, or the
+                session cannot be started or does not become idle.
+        """
+        # Created before the session so that an invalid max_workers cannot leave
+        # a newly started session behind; the executor starts no threads until used.
+        self._max_workers = max_workers
+        self._executor = ThreadPoolExecutor(max_workers=max_workers)
         super().__init__(
             session_id=session_id,
             description=description,
             engine_configuration=engine_configuration,
             notebook_version=notebook_version,
             session_idle_timeout_minutes=session_idle_timeout_minutes,
+            terminate_session_on_close=terminate_session_on_close,
             **kwargs,
         )
-        self._max_workers = max_workers
-        self._executor = ThreadPoolExecutor(max_workers=max_workers)
 
     def close(self, wait: bool = False) -> None:
-        """Terminate the Spark session, then shut down the executor.
+        """Close the cursor, then shut down the executor.
 
+        The session is terminated as described in ``SparkBaseCursor.close()``.
         The executor is shut down even if terminating the session fails.
-        If termination fails, calling this method again retries it.
 
         Args:
             wait: Whether to wait for submitted futures to finish before returning

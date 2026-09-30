@@ -2,11 +2,10 @@
 
 # SQLAlchemy
 
-Install SQLAlchemy with `pip install "SQLAlchemy>=1.0.0"` or `pip install PyAthena[sqlalchemy]`.
-Supported SQLAlchemy is 1.0.0 or higher.
+Install SQLAlchemy with `pip install "SQLAlchemy>=2.0.0"` or `pip install PyAthena[sqlalchemy]`.
+Supported SQLAlchemy is 2.0.0 or higher.
 
-For async support (`create_async_engine`), install with `pip install PyAthena[aiosqlalchemy]`
-(requires SQLAlchemy 2.0+).
+For async support (`create_async_engine`), install with `pip install PyAthena[aiosqlalchemy]`.
 
 ## Basic usage
 
@@ -86,7 +85,7 @@ Glue rejects line breaks in Hive column comments.
 Athena does not persist the table-level `COMMENT` when creating an Iceberg table, so its reflected table comment is `None`; column comments are preserved.
 
 SQLAlchemy's Inspector caches reflection results, including both positive and negative `has_table()` results.
-After creating or dropping a table, use a new Inspector or call `inspector.clear_cache()` (SQLAlchemy 2.0+) before inspecting it again.
+After creating or dropping a table, use a new Inspector or call `inspector.clear_cache()` before inspecting it again.
 The dialect does not cache direct `has_table()` calls without an `info_cache`.
 
 Table listings include column and table metadata.
@@ -190,7 +189,7 @@ Column definitions in `CREATE TABLE` render `TIMESTAMP` for `DateTime` and for `
 
 ### Async
 
-Requires `pip install PyAthena[aiosqlalchemy]` (SQLAlchemy 2.0+).
+Requires `pip install PyAthena[aiosqlalchemy]`.
 
 | Dialect   | Driver    | Schema              | Cursor                       |
 |-----------|-----------|---------------------|------------------------------|
@@ -753,8 +752,44 @@ engine_arrow = create_engine(
 | `Double`, `DOUBLE`, `DOUBLE_PRECISION` | `DOUBLE` | `DOUBLE` |
 
 Athena `FLOAT` and `REAL` are the same 32-bit floating-point type, which keeps about seven significant digits.
-Use `Double` (SQLAlchemy 2.0+) for 64-bit values.
+Use `Double` for 64-bit values.
 `Float(precision)` does not change the Athena type.
+
+## Bulk inserts
+
+An insert executed with a list of parameter sets runs as multi-row `INSERT INTO ... VALUES (...), (...)` statements of up to 100 rows each, instead of one query per row.
+This applies to Core `insert()` with a list of parameters and to ORM flushes that insert several objects.
+`CursorResult.rowcount` is the total number of inserted rows, or -1 if Athena does not report a count.
+If a statement fails, the rows of the earlier statements remain inserted.
+
+Athena limits a query to 262,144 bytes.
+For wide rows, lower the number of rows per statement for the engine or for one execution.
+To run one query per row, disable the batching:
+
+```python
+from sqlalchemy import create_engine
+
+engine = create_engine(
+    "awsathena+rest://:@athena.us-west-2.amazonaws.com:443/default?s3_staging_dir=s3://YOUR_S3_BUCKET/path/to/",
+    insertmanyvalues_page_size=20,
+)
+
+with engine.begin() as conn:
+    conn.execution_options(insertmanyvalues_page_size=5).execute(table.insert(), rows)
+
+engine_per_row = create_engine(
+    "awsathena+rest://:@athena.us-west-2.amazonaws.com:443/default?s3_staging_dir=s3://YOUR_S3_BUCKET/path/to/",
+    use_insertmanyvalues=False,
+)
+```
+
+Both engine options can also be set in the connection string, or as string values for `engine_from_config`.
+A value passed to `create_engine` takes precedence over the connection string.
+
+```text
+awsathena+rest://:@athena.us-west-2.amazonaws.com:443/default?s3_staging_dir=s3://YOUR_S3_BUCKET/path/to/&insertmanyvalues_page_size=20
+awsathena+rest://:@athena.us-west-2.amazonaws.com:443/default?s3_staging_dir=s3://YOUR_S3_BUCKET/path/to/&use_insertmanyvalues=false
+```
 
 ## Complex data types
 
@@ -790,11 +825,16 @@ This generates the following SQL structure:
 
 ```sql
 CREATE TABLE users (
-    id INTEGER,
-    profile ROW(name STRING, age INTEGER, email STRING),
-    settings ROW(theme STRING, notifications ROW(email STRING, push STRING))
+    id INT,
+    profile STRUCT<name:STRING, age:INT, email:STRING>,
+    settings STRUCT<theme:STRING, notifications:STRUCT<email:STRING, push:STRING>>
 )
 ```
+
+`CREATE TABLE` renders `AthenaStruct` columns with Hive `STRUCT<name:type, ...>` syntax at every nesting depth.
+That includes top-level columns, fields of a STRUCT, STRUCT values inside MAP, and STRUCT values inside ARRAY.
+Integer fields, and integer MAP keys and values, use `INT` in that DDL.
+`CAST` and other SQL expressions keep `ROW(...)`, `MAP(...)`, and `ARRAY(...)`, and spell integers as `INTEGER`.
 
 #### Querying STRUCT data
 
@@ -935,12 +975,15 @@ This generates the following SQL structure:
 
 ```sql
 CREATE TABLE products (
-    id INTEGER,
+    id INT,
     attributes MAP<STRING, STRING>,
-    metrics MAP<STRING, INTEGER>,
-    categories MAP<INTEGER, STRING>
+    metrics MAP<STRING, INT>,
+    categories MAP<INT, STRING>
 )
 ```
+
+`CREATE TABLE` renders integer MAP keys and values as `INT`.
+`CAST` still spells those integers as `INTEGER`.
 
 #### Querying MAP data
 

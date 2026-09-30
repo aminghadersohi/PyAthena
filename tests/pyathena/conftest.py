@@ -1,8 +1,6 @@
 import contextlib
 import functools
 import uuid
-from io import BytesIO
-from pathlib import Path
 
 import boto3
 import pytest
@@ -10,37 +8,39 @@ import sqlalchemy
 from sqlalchemy.ext.asyncio import create_async_engine as _create_async_engine
 
 from tests import ASYNC_SQLALCHEMY_CONNECTION_STRING, ENV, SQLALCHEMY_CONNECTION_STRING
+from tests.pyathena.tables import TABLES, VIEWS, spark_group_by_csv
 from tests.pyathena.util import read_query
 
 
 def pytest_sessionstart(session):
+    # The pytest-xdist controller runs no tests, so it sets up nothing.
+    if not _is_test_process(session.config):
+        return
+    _create_s3tables_namespace()
     # pytest skips pytest_sessionfinish after a failed pytest_sessionstart, so
     # a failure after the namespace is created deletes it here.
-    is_test_process = _is_test_process(session.config)
-    if is_test_process:
-        _create_s3tables_namespace()
     try:
-        _upload_rows()
+        _upload_data()
         with contextlib.closing(connect()) as conn, conn.cursor() as cursor:
             _create_database(cursor)
-            _create_table(cursor)
+            _create_tables(cursor)
     except BaseException:
-        if is_test_process:
-            _delete_s3tables_namespace()
+        _delete_s3tables_namespace()
         raise
 
 
 def pytest_sessionfinish(session):
+    if not _is_test_process(session.config):
+        return
     # Each cleanup step runs even if an earlier one fails.
     try:
         with contextlib.closing(connect()) as conn, conn.cursor() as cursor:
             _drop_database(cursor)
     finally:
         try:
-            _delete_rows()
+            _delete_data()
         finally:
-            if _is_test_process(session.config):
-                _delete_s3tables_namespace()
+            _delete_s3tables_namespace()
 
 
 def _is_test_process(config):
@@ -106,26 +106,37 @@ def _delete_s3tables_namespace():
     client.delete_namespace(tableBucketARN=arn, namespace=ENV.s3tables_namespace)
 
 
-def _upload_rows():
-    client = boto3.client("s3")
-    rows = Path(__file__).parents[1].resolve() / "resources" / "rows"
-    for row in rows.iterdir():
-        key = f"{ENV.s3_staging_key}{ENV.schema}/{row.stem}/{row.name}"
-        client.upload_file(str(row), ENV.s3_staging_bucket, key)
-    client.upload_fileobj(
-        BytesIO(b"0123456789"),
-        ENV.s3_staging_bucket,
-        ENV.s3_filesystem_test_file_key,
-    )
+@functools.cache
+def _data_objects():
+    """Return the S3 objects the session uploads: the table data files and test files.
+
+    Returns:
+        A dict from S3 key to object content.
+    """
+    prefix = f"{ENV.s3_staging_key}{ENV.schema}"
+    objects = {
+        ENV.s3_filesystem_test_file_key: b"0123456789",
+        f"{prefix}/spark_group_by/spark_group_by.csv": spark_group_by_csv(),
+    }
+    for table in TABLES:
+        if data_file := table.data_file():
+            name, content = data_file
+            objects[f"{prefix}/{table.name}/{name}"] = content
+    return objects
 
 
-def _delete_rows():
+def _upload_data():
+    """Upload the objects from ``_data_objects``."""
     client = boto3.client("s3")
-    rows = Path(__file__).parents[1].resolve() / "resources" / "rows"
-    for row in rows.iterdir():
-        key = f"{ENV.s3_staging_key}{ENV.schema}/{row.stem}/{row.name}"
+    for key, content in _data_objects().items():
+        client.put_object(Bucket=ENV.s3_staging_bucket, Key=key, Body=content)
+
+
+def _delete_data():
+    """Delete the objects from ``_data_objects``."""
+    client = boto3.client("s3")
+    for key in _data_objects():
         client.delete_object(Bucket=ENV.s3_staging_bucket, Key=key)
-    client.delete_object(Bucket=ENV.s3_staging_bucket, Key=ENV.s3_filesystem_test_file_key)
 
 
 def _create_database(cursor):
@@ -138,11 +149,17 @@ def _drop_database(cursor):
         cursor.execute(q)
 
 
-def _create_table(cursor):
-    for q in read_query(
-        "create_table.sql.jinja2", s3_staging_dir=ENV.s3_staging_dir, schema=ENV.schema
-    ):
-        cursor.execute(q)
+def _create_tables(cursor):
+    """Create the tables and views from ``tests.pyathena.tables``.
+
+    Args:
+        cursor: The cursor to run the statements with.
+    """
+    for table in TABLES:
+        location = f"{ENV.s3_staging_dir}{ENV.schema}/{table.name}/"
+        cursor.execute(table.create_statement(ENV.schema, location))
+    for view in VIEWS:
+        cursor.execute(view.create_statement(ENV.schema))
 
 
 def connect(schema_name="default", **kwargs):
@@ -245,6 +262,33 @@ def executemany_table(cursor):
             yield table
         finally:
             table_cursor.execute(f"DROP TABLE IF EXISTS {table}")
+
+
+@pytest.fixture
+def empty_table():
+    """Create an empty ``(a INT, b STRING)`` text table for one test and drop it on teardown.
+
+    The table has its own connection, so a test with any cursor type, including
+    the aio cursors, can write to it.
+
+    Yields:
+        The table name qualified with ``ENV.schema``.
+    """
+    table_name = f"empty_{uuid.uuid4().hex}"
+    table = f"{ENV.schema}.{table_name}"
+    with contextlib.closing(connect(schema_name=ENV.schema)) as conn, conn.cursor() as cursor:
+        try:
+            cursor.execute(
+                f"""
+                CREATE EXTERNAL TABLE {table} (a INT, b STRING)
+                ROW FORMAT DELIMITED FIELDS TERMINATED BY '\\t' LINES TERMINATED BY '\\n'
+                STORED AS TEXTFILE
+                LOCATION '{ENV.s3_staging_dir}{ENV.schema}/{table_name}/'
+                """
+            )
+            yield table
+        finally:
+            cursor.execute(f"DROP TABLE IF EXISTS {table}")
 
 
 @pytest.fixture

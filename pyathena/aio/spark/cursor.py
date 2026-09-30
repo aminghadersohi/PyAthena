@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from typing import Any, cast
 
 from pyathena.aio.util import async_retry_api_call
@@ -55,14 +56,34 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
         engine_configuration: dict[str, Any] | None = None,
         notebook_version: str | None = None,
         session_idle_timeout_minutes: int | None = None,
+        terminate_session_on_close: bool | None = None,
         **kwargs,
     ) -> None:
+        """Initialize the cursor and start or attach to a Spark session.
+
+        Args:
+            session_id: ID of an existing session to use. If omitted, a new
+                session is started.
+            description: Description of a new session.
+            engine_configuration: Engine configuration of a new session.
+            notebook_version: Notebook version of a new session.
+            session_idle_timeout_minutes: Idle timeout of a new session in minutes.
+            terminate_session_on_close: Whether ``close()`` terminates the session.
+                If None, only a session started by this cursor is terminated;
+                a session supplied with ``session_id`` is left running.
+            **kwargs: Arguments passed to ``SparkBaseCursor``.
+
+        Raises:
+            OperationalError: If the supplied session does not exist, or the
+                session cannot be started or does not become idle.
+        """
         super().__init__(
             session_id=session_id,
             description=description,
             engine_configuration=engine_configuration,
             notebook_version=notebook_version,
             session_idle_timeout_minutes=session_idle_timeout_minutes,
+            terminate_session_on_close=terminate_session_on_close,
             **kwargs,
         )
 
@@ -113,12 +134,69 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
         description: str | None = None,
         client_request_token: str | None = None,
     ) -> str:
+        """Start a calculation execution with ``StartCalculationExecution``.
+
+        Without ``client_request_token``, a generated token is sent, so that a
+        retried request returns the calculation an earlier attempt started instead
+        of starting another one.
+
+        With ``kill_on_interrupt`` enabled, the request is shielded from task
+        cancellation. On cancellation, waits for the request to finish, requests
+        cancellation of the calculation it started, waits for a terminal state,
+        stores the calculation ID and execution on the cursor, and re-raises
+        ``asyncio.CancelledError``. Another cancellation during that wait
+        propagates at once.
+
+        Args:
+            session_id: The session ID.
+            code_block: The code to run.
+            description: The calculation description.
+            client_request_token: The idempotency token of the request.
+
+        Returns:
+            The calculation execution ID.
+
+        Raises:
+            asyncio.CancelledError: If the task is cancelled while starting the
+                calculation. A failure to start, cancel, or wait for the
+                calculation becomes its ``__cause__``.
+            DatabaseError: If the request fails.
+        """
         request = self._build_start_calculation_execution_request(
             session_id=session_id,
             code_block=code_block,
             description=description,
-            client_request_token=client_request_token,
+            client_request_token=client_request_token or str(uuid.uuid4()),
         )
+        if not self._kill_on_interrupt:
+            return await self._start_calculation_execution(request)
+
+        start = asyncio.ensure_future(self._start_calculation_execution(request))
+        try:
+            return await asyncio.shield(start)
+        except asyncio.CancelledError as cancellation:
+            _logger.warning("Query canceled by user.")
+            try:
+                self._calculation_id = await start
+                await self._cancel_and_wait(self._calculation_id)
+            except Exception as e:
+                raise cancellation from e
+            raise
+
+    async def _start_calculation_execution(  # type: ignore[override]
+        self, request: dict[str, Any]
+    ) -> str:
+        """Send a ``StartCalculationExecution`` request.
+
+        Args:
+            request: The request parameters.
+
+        Returns:
+            The calculation execution ID.
+
+        Raises:
+            DatabaseError: If the request fails.
+        """
         try:
             response = await async_retry_api_call(
                 self._connection.client.start_calculation_execution,
@@ -126,38 +204,84 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
                 logger=_logger,
                 **request,
             )
-            calculation_id = response.get("CalculationExecutionId")
         except Exception as e:
             _logger.exception("Failed to execute calculation.")
             raise DatabaseError(*e.args) from e
-        return cast(str, calculation_id)
+        return cast(str, response.get("CalculationExecutionId"))
 
-    async def __poll(self, query_id: str) -> AthenaQueryExecution | AthenaCalculationExecution:
+    async def _poll_until_terminal(  # type: ignore[override]
+        self, query_id: str
+    ) -> AthenaQueryExecution | AthenaCalculationExecution:
+        """Poll a calculation execution until it reaches a terminal state.
+
+        Calls ``on_poll`` with every status and awaits ``poll_interval`` seconds
+        between requests.
+
+        Args:
+            query_id: The calculation execution ID.
+
+        Returns:
+            The calculation execution in a terminal state.
+
+        Raises:
+            OperationalError: If a status request fails.
+        """
         while True:
             calculation_status = await self._get_calculation_execution_status(query_id)
             if self._on_poll:
                 self._on_poll(calculation_status)
-            if calculation_status.state in [
-                AthenaCalculationExecutionStatus.STATE_COMPLETED,
-                AthenaCalculationExecutionStatus.STATE_FAILED,
-                AthenaCalculationExecutionStatus.STATE_CANCELED,
-            ]:
+            if calculation_status.state in AthenaCalculationExecutionStatus.TERMINAL_STATES:
                 return await self._get_calculation_execution(query_id)
             await asyncio.sleep(self._poll_interval)
 
     async def _poll(  # type: ignore[override]
         self, query_id: str
     ) -> AthenaQueryExecution | AthenaCalculationExecution:
+        """Wait for a calculation execution to reach a terminal state.
+
+        On task cancellation with ``kill_on_interrupt`` enabled, requests
+        cancellation, waits for the calculation to reach a terminal state, stores
+        it as the cursor's calculation execution, and re-raises
+        ``asyncio.CancelledError``.
+        Cancellation is a best-effort request, so the terminal state can be
+        ``COMPLETED`` or ``FAILED`` instead of ``CANCELED``.
+
+        Args:
+            query_id: The calculation execution ID.
+
+        Returns:
+            The calculation execution in a terminal state.
+
+        Raises:
+            asyncio.CancelledError: If the task is cancelled while waiting. A failure
+                to cancel or wait for the calculation becomes its ``__cause__``.
+            OperationalError: If a status request fails.
+        """
         try:
-            query_execution = await self.__poll(query_id)
-        except asyncio.CancelledError:
-            if self._kill_on_interrupt:
-                _logger.warning("Query canceled by user.")
-                await self._cancel(query_id)
-                query_execution = await self.__poll(query_id)
-            else:
+            return await self._poll_until_terminal(query_id)
+        except asyncio.CancelledError as cancellation:
+            if not self._kill_on_interrupt:
                 raise
-        return query_execution
+            _logger.warning("Query canceled by user.")
+            try:
+                await self._cancel_and_wait(query_id)
+            except Exception as e:
+                raise cancellation from e
+            raise
+
+    async def _cancel_and_wait(self, calculation_id: str) -> None:  # type: ignore[override]
+        """Request cancellation and store the calculation's terminal state.
+
+        Args:
+            calculation_id: The calculation execution ID.
+
+        Raises:
+            OperationalError: If the cancellation or a status request fails.
+        """
+        await self._cancel(calculation_id)
+        self._calculation_execution = cast(
+            AthenaCalculationExecution, await self._poll_until_terminal(calculation_id)
+        )
 
     async def _cancel(self, query_id: str) -> None:  # type: ignore[override]
         request: dict[str, Any] = {"CalculationExecutionId": query_id}
@@ -182,7 +306,7 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
                 **request,
             )
         except Exception as e:
-            _logger.exception("Failed to terminate session.")
+            _logger.exception(f"Failed to terminate session: {self._session_id}.")
             raise OperationalError(*e.args) from e
 
     async def _read_s3_file_as_text(self, uri) -> str:  # type: ignore[override]
@@ -267,8 +391,19 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
         await self._cancel(self.calculation_id)
 
     async def close(self) -> None:  # type: ignore[override]
-        """Close the cursor by terminating the Spark session."""
-        await self._terminate_session()
+        """Close the cursor, terminating its Spark session if configured to.
+
+        See ``terminate_session_on_close``. After a successful termination,
+        further calls do not terminate the session again; after a failed one,
+        calling this method again retries it.
+
+        Raises:
+            OperationalError: If terminating the session fails.
+        """
+        if self._terminate_session_on_close:
+            await self._terminate_session()
+            # Terminated; later calls do nothing.
+            self._terminate_session_on_close = False
 
     async def executemany(  # type: ignore[override]
         self,

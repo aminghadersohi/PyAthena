@@ -6,7 +6,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from itertools import chain
 from pathlib import Path
 from types import SimpleNamespace
@@ -786,7 +786,7 @@ class TestS3FileSystem:
         with pytest.raises(FileNotFoundError):
             fs.info(file)
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         fs.pipe(file, b"a")
         bucket, key, version_id = fs.parse_path(file)
         fs.invalidate_cache()

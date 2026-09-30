@@ -12,17 +12,20 @@ import pandas as pd
 import pytest
 import sqlalchemy
 from botocore.exceptions import ClientError
-from sqlalchemy import create_engine, func, literal_column, select, text, types
+from sqlalchemy import create_engine, engine_from_config, func, literal_column, select, text, types
 from sqlalchemy.exc import NoSuchTableError
 from sqlalchemy.sql import expression, type_coerce
 from sqlalchemy.sql.ddl import CreateTable
 from sqlalchemy.sql.schema import Column, MetaData, Table
 from sqlalchemy.sql.selectable import TextualSelect
 
+from pyathena.aio.sqlalchemy.base import AthenaAioDialect
 from pyathena.converter import DefaultTypeConverter
 from pyathena.cursor import Cursor
 from pyathena.error import DatabaseError, OperationalError
+from pyathena.formatter import DefaultParameterFormatter
 from pyathena.sqlalchemy.base import AthenaDialect
+from pyathena.sqlalchemy.compiler import AthenaTypeCompiler
 from pyathena.sqlalchemy.rest import AthenaRestDialect
 from pyathena.sqlalchemy.types import (
     TINYINT,
@@ -31,11 +34,10 @@ from pyathena.sqlalchemy.types import (
     AthenaStruct,
     AthenaTimestamp,
     Tinyint,
-    get_double_type,
 )
 from pyathena.util import RetryConfig
 from tests.pyathena.conftest import ENV
-from tests.pyathena.util import throttle_metadata_api
+from tests.pyathena.util import decorated, throttle_metadata_api
 
 # Amazon S3 Tables tests need a pre-provisioned table-bucket catalog; the session
 # creates its own namespace in it.
@@ -61,6 +63,53 @@ def unique_s3tables_table_name(base: str) -> str:
     return f"{base}_{uuid.uuid4().hex[:8]}"
 
 
+def recording_engine(rowcounts=None, query="", config=None, **kwargs):
+    """Create an engine whose DB API connection records statements offline.
+
+    Args:
+        rowcounts: Row counts reported by successive cursor calls. By default,
+            a call reports the number of rows it inserted.
+        query: The query string of the connection URL, without ``?``.
+        config: String engine options to pass through ``engine_from_config``
+            instead of calling ``create_engine`` directly.
+        **kwargs: Additional keyword arguments for ``create_engine``.
+
+    Returns:
+        A tuple of the engine and the list of recorded
+        ``(method, operation, parameters)`` calls.
+    """
+    calls = []
+    counts = iter(rowcounts or ())
+
+    class RecordingCursor:
+        description = None
+        rowcount = -1
+
+        def execute(self, operation, parameters=None, **_):
+            calls.append(("execute", operation, parameters))
+            rows = sum(1 for key in parameters if key.startswith("id"))
+            self.rowcount = next(counts, rows)
+
+        def executemany(self, operation, seq_of_parameters, **_):
+            calls.append(("executemany", operation, seq_of_parameters))
+            self.rowcount = next(counts, len(seq_of_parameters))
+
+        def close(self):
+            pass
+
+    connection = SimpleNamespace(
+        cursor=RecordingCursor, close=lambda: None, commit=lambda: None, rollback=lambda: None
+    )
+    url = f"awsathena+rest://athena.us-west-2.amazonaws.com/default?{query}"
+    if config is not None:
+        configuration = {"sqlalchemy.url": url}
+        configuration.update({f"sqlalchemy.{key}": value for key, value in config.items()})
+        engine = engine_from_config(configuration, creator=lambda: connection, **kwargs)
+    else:
+        engine = create_engine(url, creator=lambda: connection, **kwargs)
+    return engine, calls
+
+
 class TestAthenaDialect:
     def test_bare_scheme_uses_rest_driver(self):
         # The bare awsathena entry point resolves to the REST dialect, like
@@ -73,13 +122,20 @@ class TestAthenaDialect:
         assert bare.url.get_driver_name() == "rest"
         assert bare.dialect.dialect_description == "awsathena+rest"
 
+    @pytest.mark.parametrize("dialect_class", [AthenaDialect, AthenaAioDialect])
+    def test_type_compiler(self, dialect_class):
+        # SQLAlchemy 2.0 builds the type compiler from type_compiler_cls. A legacy
+        # type_compiler class attribute would take precedence over it.
+        assert not hasattr(dialect_class, "type_compiler")
+        assert dialect_class.type_compiler_cls is AthenaTypeCompiler
+        assert isinstance(dialect_class().type_compiler_instance, AthenaTypeCompiler)
+
     def test_columns_from_information_schema(self):
         # Rows arrive unordered, and Athena reports a missing comment as NULL.
-        # An API cursor hands that over as None or as an empty string; a
-        # converter supplied in cursor_kwargs is applied after the one this path
-        # pins, and one written for a DataFrame cursor reports it as NaN.
+        # The API cursor this path pins hands that over as None or as an empty
+        # string.
         rows = [
-            ("4", "dt", "varchar", float("nan"), "partition key"),
+            ("4", "dt", "varchar", None, "partition key"),
             ("1", "id", "integer", "identifier", None),
             ("2", "payload", "row(a integer, b array(varchar))", None, None),
             ("3", "label", "varchar", "", ""),
@@ -152,6 +208,35 @@ class TestAthenaDialect:
         assert derived.exceptions == ("InternalServerException",)
         assert (derived.attempt, derived.multiplier, derived.max_delay) == (10, 2, 30)
         assert derived.exponential_base == 3
+
+    @pytest.mark.parametrize("configured", [False, True], ids=["connection", "cursor_kwargs"])
+    def test_column_lookup_retry_config(self, configured):
+        # The lookup cursor drops the retries the fallback answers from the
+        # connection's policy, but a retry_config in cursor_kwargs replaces it.
+        policy = RetryConfig(exceptions=("ThrottlingException", "InternalServerException"))
+        retry_configs = []
+        metadata = SimpleNamespace(columns=[], partition_keys=[])
+        cursor = SimpleNamespace(get_table_metadata=lambda table_name, **kwargs: metadata)
+
+        def open_cursor(**kwargs):
+            retry_configs.append(kwargs["retry_config"])
+            return contextlib.nullcontext(cursor)
+
+        raw_connection = SimpleNamespace(
+            cursor_kwargs={"retry_config": policy} if configured else {},
+            catalog_name="awsdatacatalog",
+            schema_name="default",
+            retry_config=policy,
+            driver_connection=SimpleNamespace(cursor=open_cursor),
+        )
+
+        AthenaDialect()._get_columns(SimpleNamespace(connection=raw_connection), "events")
+
+        (retry_config,) = retry_configs
+        if configured:
+            assert retry_config is policy
+        else:
+            assert retry_config.exceptions == ("InternalServerException",)
 
     def test_cursor_schema_applies_to_lookup_fallback_and_cache(self):
         # A schema given in cursor_kwargs is the one the cursor queries, so the
@@ -502,6 +587,186 @@ class TestAthenaDialect:
             ("pyathena_table_metadata", "other_catalog", "default", table_name): listed
         }
 
+    def test_insertmanyvalues_pages(self):
+        engine, calls = recording_engine()
+        table = Table("t", MetaData(), Column("id", types.Integer), Column("name", types.String))
+
+        with engine.connect() as conn:
+            result = conn.execute(
+                table.insert(), [{"id": i, "name": f"name {i}"} for i in range(250)]
+            )
+
+        # 100 rows per statement by default, and the total row count.
+        assert [(method, len(parameters) // 2) for method, _, parameters in calls] == [
+            ("execute", 100),
+            ("execute", 100),
+            ("execute", 50),
+        ]
+        assert result.rowcount == 250
+        _, operation, parameters = calls[-1]
+        assert (
+            DefaultParameterFormatter()
+            .format(operation, parameters)
+            .startswith("INSERT INTO t (id, name) VALUES (200, 'name 200'), (201, 'name 201'), ")
+        )
+
+    def test_insertmanyvalues_unknown_rowcount(self):
+        engine, _ = recording_engine(rowcounts=[100, -1, 50])
+        table = Table("t", MetaData(), Column("id", types.Integer))
+
+        with engine.connect() as conn:
+            result = conn.execute(table.insert(), [{"id": i} for i in range(250)])
+
+        assert result.rowcount == -1
+
+    @pytest.mark.parametrize("configure", ["engine", "execution_options"])
+    def test_insertmanyvalues_page_size(self, configure):
+        engine_kwargs = {"insertmanyvalues_page_size": 2} if configure == "engine" else {}
+        engine, calls = recording_engine(**engine_kwargs)
+        table = Table("t", MetaData(), Column("id", types.Integer))
+
+        with engine.connect() as conn:
+            if configure == "execution_options":
+                conn = conn.execution_options(insertmanyvalues_page_size=2)
+            result = conn.execute(table.insert(), [{"id": i} for i in range(5)])
+
+        assert [len(parameters) for _, _, parameters in calls] == [2, 2, 1]
+        assert result.rowcount == 5
+
+    @pytest.mark.parametrize(
+        ("query", "expected"),
+        [
+            ("insertmanyvalues_page_size=2", [("execute", 2), ("execute", 2), ("execute", 1)]),
+            ("use_insertmanyvalues=false", [("executemany", 5)]),
+            (
+                "use_insertmanyvalues=true&insertmanyvalues_page_size=3",
+                [("execute", 3), ("execute", 2)],
+            ),
+        ],
+    )
+    def test_insertmanyvalues_url_options(self, query, expected):
+        engine, calls = recording_engine(query=f"s3_staging_dir=s3://bucket/path/&{query}")
+        table = Table("t", MetaData(), Column("id", types.Integer))
+
+        with engine.connect() as conn:
+            result = conn.execute(table.insert(), [{"id": i} for i in range(5)])
+
+        assert [(method, len(parameters)) for method, _, parameters in calls] == expected
+        assert result.rowcount == 5
+        # The options configure the dialect and never reach pyathena.connect().
+        assert engine.dialect._connect_options == {
+            "aws_access_key_id": None,
+            "aws_secret_access_key": None,
+            "region_name": "us-west-2",
+            "schema_name": "default",
+            "s3_staging_dir": "s3://bucket/path/",
+        }
+
+    @pytest.mark.parametrize(
+        ("query", "kwargs", "expected"),
+        [
+            (
+                "use_insertmanyvalues=true",
+                {"use_insertmanyvalues": False},
+                [("executemany", 5)],
+            ),
+            (
+                "insertmanyvalues_page_size=2",
+                {"insertmanyvalues_page_size": 3},
+                [("execute", 3), ("execute", 2)],
+            ),
+            # An overridden URL value is not parsed.
+            (
+                "insertmanyvalues_page_size=invalid&use_insertmanyvalues=invalid",
+                {"insertmanyvalues_page_size": 3, "use_insertmanyvalues": True},
+                [("execute", 3), ("execute", 2)],
+            ),
+        ],
+    )
+    def test_insertmanyvalues_keyword_overrides_url(self, query, kwargs, expected):
+        engine, calls = recording_engine(query=query, **kwargs)
+        table = Table("t", MetaData(), Column("id", types.Integer))
+
+        with engine.connect() as conn:
+            result = conn.execute(table.insert(), [{"id": i} for i in range(5)])
+
+        assert [(method, len(parameters)) for method, _, parameters in calls] == expected
+        assert result.rowcount == 5
+        assert set(engine.dialect._connect_options).isdisjoint(AthenaDialect._URL_ENGINE_OPTIONS)
+
+    @pytest.mark.parametrize(
+        ("config", "expected"),
+        [
+            ({"insertmanyvalues_page_size": "2"}, [("execute", 2), ("execute", 2), ("execute", 1)]),
+            ({"use_insertmanyvalues": "false"}, [("executemany", 5)]),
+        ],
+    )
+    def test_insertmanyvalues_engine_from_config(self, config, expected):
+        engine, calls = recording_engine(config=config)
+        table = Table("t", MetaData(), Column("id", types.Integer))
+
+        with engine.connect() as conn:
+            result = conn.execute(table.insert(), [{"id": i} for i in range(5)])
+
+        assert [(method, len(parameters)) for method, _, parameters in calls] == expected
+        assert result.rowcount == 5
+
+    def test_insertmanyvalues_disabled(self):
+        engine, calls = recording_engine(use_insertmanyvalues=False)
+        table = Table("t", MetaData(), Column("id", types.Integer))
+
+        with engine.connect() as conn:
+            result = conn.execute(table.insert(), [{"id": i} for i in range(3)])
+
+        ((method, operation, parameters),) = calls
+        assert method == "executemany"
+        assert operation == "INSERT INTO t (id) VALUES (%(id)s)"
+        assert parameters == [{"id": 0}, {"id": 1}, {"id": 2}]
+        assert result.rowcount == 3
+
+    def test_insertmanyvalues_formats_rows(self):
+        engine, calls = recording_engine()
+        table = Table(
+            "t",
+            MetaData(),
+            Column("id", types.Integer),
+            Column("name", types.String),
+            Column("data", types.LargeBinary),
+            Column("ts", types.DateTime),
+            Column("amount", types.Numeric(10, 3)),
+            Column("tags", AthenaArray(types.Integer)),
+        )
+        rows = [
+            {
+                "id": 1,
+                "name": "it's 100%",
+                "data": b"\x00\x01",
+                "ts": datetime(2026, 1, 2, 3, 4, 5, 123000),
+                "amount": Decimal("1.5"),
+                "tags": [1, None],
+            },
+            {
+                "id": 2,
+                "name": None,
+                "data": None,
+                "ts": datetime(2026, 1, 2, 3, 4, 5, 123456),
+                "amount": None,
+                "tags": None,
+            },
+        ]
+
+        with engine.connect() as conn:
+            conn.execute(table.insert(), rows)
+
+        ((_, operation, parameters),) = calls
+        assert DefaultParameterFormatter().format(operation, parameters) == (
+            "INSERT INTO t (id, name, data, ts, amount, tags) VALUES "
+            "(1, 'it''s 100%', X'0001', TIMESTAMP '2026-01-02 03:04:05.123', DECIMAL '1.5', "
+            "CAST(ARRAY[1, null] AS ARRAY(INTEGER))), "
+            "(2, null, null, TIMESTAMP '2026-01-02 03:04:05.123456', null, "
+            "CAST(null AS ARRAY(INTEGER)))"
+        )
+
 
 class TestSQLAlchemyAthena:
     @pytest.mark.parametrize(
@@ -801,30 +1066,13 @@ class TestSQLAlchemyAthena:
     def test_reflect_table_include_columns(self, engine):
         engine, conn = engine
         one_row_complex = Table("one_row_complex", MetaData(schema=ENV.schema))
-        version = float(re.search(r"^([\d]+\.[\d]+)\..+", sqlalchemy.__version__).group(1))
-        if version <= 1.2:
-            engine.dialect.reflecttable(
-                conn, one_row_complex, include_columns=["col_int"], exclude_columns=[]
-            )
-        elif version == 1.3:
-            # https://docs.sqlalchemy.org/en/13/changelog/changelog_13.html#change-64ac776996da1a5c3e3460b4c0f0b257
-            engine.dialect.reflecttable(
-                conn,
-                one_row_complex,
-                include_columns=["col_int"],
-                exclude_columns=[],
-                resolve_fks=True,
-            )
-        else:  # version >= 1.4
-            # https://docs.sqlalchemy.org/en/14/changelog/changelog_14.html#change-0215fae622c01f9409eb1ba2754f4792
-            # https://docs.sqlalchemy.org/en/14/core/reflection.html#sqlalchemy.engine.reflection.Inspector.reflect_table
-            insp = sqlalchemy.inspect(engine)
-            insp.reflect_table(
-                one_row_complex,
-                include_columns=["col_int"],
-                exclude_columns=[],
-                resolve_fks=True,
-            )
+        insp = sqlalchemy.inspect(engine)
+        insp.reflect_table(
+            one_row_complex,
+            include_columns=["col_int"],
+            exclude_columns=[],
+            resolve_fks=True,
+        )
         assert len(one_row_complex.c) == 1
         assert one_row_complex.c.col_int is not None
         pytest.raises(AttributeError, lambda: one_row_complex.c.col_tinyint)
@@ -1224,7 +1472,7 @@ class TestSQLAlchemyAthena:
         assert isinstance(one_row_complex.c.col_int.type, types.INTEGER)
         assert isinstance(one_row_complex.c.col_bigint.type, types.BIGINT)
         assert isinstance(one_row_complex.c.col_float.type, types.FLOAT)
-        assert isinstance(one_row_complex.c.col_double.type, get_double_type())
+        assert isinstance(one_row_complex.c.col_double.type, types.DOUBLE)
         assert isinstance(one_row_complex.c.col_string.type, types.String)
         assert isinstance(one_row_complex.c.col_varchar.type, types.VARCHAR)
         assert one_row_complex.c.col_varchar.type.length == 10
@@ -1275,7 +1523,7 @@ class TestSQLAlchemyAthena:
         assert isinstance(dialect._get_column_type("int"), types.INTEGER)
         assert isinstance(dialect._get_column_type("bigint"), types.BIGINT)
         assert isinstance(dialect._get_column_type("float"), types.FLOAT)
-        assert isinstance(dialect._get_column_type("double"), get_double_type())
+        assert isinstance(dialect._get_column_type("double"), types.DOUBLE)
         assert isinstance(dialect._get_column_type("real"), types.FLOAT)
         assert isinstance(dialect._get_column_type("string"), types.String)
         assert isinstance(dialect._get_column_type("varchar"), types.VARCHAR)
@@ -2285,6 +2533,37 @@ OUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat'
         assert actual[1] == b"varchar"
         assert actual[2] == b"a string"
 
+    def test_cast_as_decorated_types(self, engine):
+        _, conn = engine
+        casts = [
+            ("'a string'", types.String(50)),
+            ("'a string'", types.LargeBinary()),
+            ("1.5", types.Float()),
+            ("MAP(ARRAY['a'], ARRAY[1])", AthenaMap(types.String, types.Integer)),
+        ]
+        actual = conn.execute(
+            sqlalchemy.select(
+                *(expression.cast(literal_column(value), type_) for value, type_ in casts),
+                *(
+                    expression.cast(literal_column(value), decorated(type_))
+                    for value, type_ in casts
+                ),
+            )
+        ).one()
+        assert actual[: len(casts)] == actual[len(casts) :]
+        assert actual[:3] == ("a string", b"a string", 1.5)
+
+    def test_array_element_variant_round_trip(self, engine):
+        _, conn = engine
+        array = AthenaArray(types.String().with_variant(types.Integer(), "awsathena"))
+        actual = conn.execute(
+            sqlalchemy.select(
+                expression.literal([1, 2], array),
+                expression.literal([1, 2], array, literal_execute=True),
+            )
+        ).one()
+        assert actual == ([1, 2], [1, 2])
+
     def test_create_table_with_partition(self, engine):
         engine, conn = engine
         table_name = "test_create_table_with_partition"
@@ -2963,6 +3242,62 @@ SELECT {ENV.schema}.{table_name}.id, {ENV.schema}.{table_name}.name \n\
         )
         assert actual == [(2, "bar")]
 
+    def test_insertmanyvalues(self, engine):
+        engine, conn = engine
+        table_name = "insertmanyvalues"
+        table = Table(
+            table_name,
+            MetaData(schema=ENV.schema),
+            Column("id", types.Integer),
+            Column("name", types.String),
+            Column("data", types.LargeBinary),
+            Column("ts", types.DateTime),
+            Column("amount", types.Numeric(10, 3)),
+            Column("tags", AthenaArray(types.Integer)),
+            awsathena_location=f"{ENV.s3_staging_dir}{ENV.schema}/{table_name}/",
+            awsathena_tblproperties={"table_type": "ICEBERG"},
+        )
+        rows = [
+            {
+                "id": 1,
+                "name": "it's",
+                "data": b"\x00\x01",
+                "ts": datetime(2026, 1, 2, 3, 4, 5, 123000),
+                "amount": Decimal("1.5"),
+                "tags": [1, None],
+            },
+            {
+                "id": 2,
+                "name": None,
+                "data": None,
+                "ts": datetime(2026, 1, 2, 3, 4, 5, 123456),
+                "amount": Decimal("12.345"),
+                "tags": None,
+            },
+            {"id": 3, "name": "c", "data": b"", "ts": None, "amount": None, "tags": []},
+            {"id": 4, "name": "d", "data": b"d", "ts": None, "amount": None, "tags": [4]},
+            {"id": 5, "name": "e", "data": b"e", "ts": None, "amount": None, "tags": [5, 5]},
+        ]
+        statements = []
+
+        def record(conn, cursor, statement, parameters, context, executemany):
+            statements.append(statement)
+
+        table.create(bind=conn)
+        sqlalchemy.event.listen(conn, "before_cursor_execute", record)
+        try:
+            result = conn.execution_options(insertmanyvalues_page_size=2).execute(
+                table.insert(), rows
+            )
+        finally:
+            sqlalchemy.event.remove(conn, "before_cursor_execute", record)
+
+        # Rows with different literal precisions share each multi-row statement.
+        assert len(statements) == 3
+        assert result.rowcount == 5
+        actual = conn.execute(sqlalchemy.select(table).order_by(table.c.id)).mappings().all()
+        assert [dict(row) for row in actual] == rows
+
     def test_get_view_definition(self, engine):
         engine, conn = engine
         insp = sqlalchemy.inspect(engine)
@@ -3045,9 +3380,7 @@ SELECT {ENV.schema}.{table_name}.id, {ENV.schema}.{table_name}.name \n\
         assert type(actual.c.col_integer2.type) in [types.INT, types.INTEGER, types.Integer]
         assert type(actual.c.col_bigint.type) in [types.BIGINT, types.BigInteger]
         assert type(actual.c.col_biginteger.type) in [types.BIGINT, types.BigInteger]
-        expected_double_types = [types.FLOAT, types.Float]
-        if hasattr(types, "DOUBLE"):
-            expected_double_types.extend([types.DOUBLE, types.Double, types.DOUBLE_PRECISION])
+        expected_double_types = [types.DOUBLE, types.Double, types.DOUBLE_PRECISION]
         assert type(actual.c.col_double1.type) in expected_double_types
         assert type(actual.c.col_double2.type) in expected_double_types
         assert type(actual.c.col_double_precision.type) in expected_double_types
@@ -3185,8 +3518,8 @@ SELECT {ENV.schema}.{table_name}.id, {ENV.schema}.{table_name}.name \n\
 
         # Verify MAP types are correctly compiled
         assert "attributes MAP<STRING, STRING>" in ddl_string
-        assert "metrics MAP<STRING, INTEGER>" in ddl_string
-        assert "complex_map MAP<STRING, ROW(value STRING, count INTEGER)>" in ddl_string
+        assert "metrics MAP<STRING, INT>" in ddl_string
+        assert "complex_map MAP<STRING, STRUCT<value:STRING, count:INT>>" in ddl_string
         assert "nested_map MAP<STRING, ARRAY<STRING>>" in ddl_string
 
     def test_create_table_with_struct_types(self, engine):
@@ -3228,12 +3561,12 @@ SELECT {ENV.schema}.{table_name}.id, {ENV.schema}.{table_name}.name \n\
         ddl_string = str(create_ddl)
 
         # Verify STRUCT types are correctly compiled
-        assert "user_info ROW(name STRING, age INTEGER, email STRING)" in ddl_string
+        assert "user_info STRUCT<name:STRING, age:INT, email:STRING>" in ddl_string
         assert (
-            "nested_struct ROW(personal ROW(first_name STRING, last_name STRING), "
-            "preferences MAP<STRING, STRING>)" in ddl_string
+            "nested_struct STRUCT<personal:STRUCT<first_name:STRING, last_name:STRING>, "
+            "preferences:MAP<STRING, STRING>>" in ddl_string
         )
-        assert "struct_with_array ROW(tags ARRAY<STRING>, scores ARRAY<INT>)" in ddl_string
+        assert "struct_with_array STRUCT<tags:ARRAY<STRING>, scores:ARRAY<INT>>" in ddl_string
 
     def test_create_table_with_complex_nested_types(self, engine):
         """Test DDL compilation for complex nested combinations of ARRAY, MAP, and STRUCT."""
@@ -3270,6 +3603,57 @@ SELECT {ENV.schema}.{table_name}.id, {ENV.schema}.{table_name}.name \n\
             "tags:ARRAY<STRING>>>>"
         )
         assert expected_type in ddl_string
+
+    def test_external_parquet_struct_columns_round_trip(self, engine):
+        """Create a Parquet table of top-level and MAP-nested STRUCTs and read the fields back."""
+        _, conn = engine
+        table_name = "test_external_parquet_struct_columns"
+        location = f"{ENV.s3_staging_dir}{ENV.schema}/{table_name}/"
+        table = Table(
+            table_name,
+            MetaData(schema=ENV.schema),
+            Column(
+                "profile",
+                AthenaStruct(
+                    ("name", types.String),
+                    ("age", types.Integer),
+                    (
+                        "address",
+                        AthenaStruct(("city", types.String), ("zip", types.Integer)),
+                    ),
+                ),
+            ),
+            Column(
+                "labels",
+                AthenaMap(
+                    types.String,
+                    AthenaStruct(("value", types.String), ("count", types.Integer)),
+                ),
+            ),
+            awsathena_location=location,
+            awsathena_file_format="PARQUET",
+        )
+        ddl = str(CreateTable(table).compile(dialect=conn.dialect))
+        assert "profile STRUCT<name:STRING, age:INT, address:STRUCT<city:STRING, zip:INT>>" in ddl
+        assert "labels MAP<STRING, STRUCT<value:STRING, count:INT>>" in ddl
+        table.create(bind=conn)
+        conn.execute(
+            text(
+                f"INSERT INTO {ENV.schema}.{table_name} VALUES ("
+                "CAST(ROW('Ada', 36, ROW('London', 12345)) AS "
+                "ROW(name VARCHAR, age INTEGER, address ROW(city VARCHAR, zip INTEGER))), "
+                "MAP(ARRAY['home'], ARRAY[CAST(ROW('Lovelace', 2) AS "
+                "ROW(value VARCHAR, count INTEGER))]))"
+            )
+        )
+        row = conn.execute(
+            text(
+                "SELECT profile.name, profile.age, profile.address.city, "
+                "profile.address.zip, labels['home'].value, labels['home'].count "
+                f"FROM {ENV.schema}.{table_name}"
+            )
+        ).one()
+        assert tuple(row) == ("Ada", 36, "London", 12345, "Lovelace", 2)
 
     def test_sqlalchemy_execute_with_execution_options_callback(self, engine):
         """Test callback functionality through SQLAlchemy execution_options."""

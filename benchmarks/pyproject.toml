@@ -10,7 +10,7 @@ name = "pyathena-benchmarks"
 version = "0.1.0"
 description = "Reproducible Athena cursor measurements"
 # The workspace lock covers the root's Python range; benchmark runs use Python 3.12.
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 classifiers = ["Private :: Do Not Upload"]
 dependencies = [
     "PyAthena[pandas,arrow,polars]",

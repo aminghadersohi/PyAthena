@@ -14,7 +14,7 @@ dependencies = [
     "fsspec",
     "python-dateutil",
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE", "NOTICE"]
@@ -24,7 +24,6 @@ classifiers = [
     "Operating System :: OS Independent",
     "Topic :: Database :: Front-Ends",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -52,17 +51,15 @@ awsathena = "pyathena.sqlalchemy.rest:AthenaRestDialect"
 "awsathena.aios3fs" = "pyathena.aio.sqlalchemy.s3fs:AthenaAioS3FSDialect"
 
 [project.optional-dependencies]
-sqlalchemy = ["sqlalchemy>=1.0.0"]
+sqlalchemy = ["sqlalchemy>=2.0.0"]
 aiosqlalchemy = [
     "sqlalchemy[asyncio]>=2.0.0",
 ]
 pandas = [
-    "pandas>=1.3.0; python_version<'3.13'",
-    "pandas>=2.3.0; python_version>='3.13'",
+    "pandas>=3.0.0",
 ]
 arrow = [
-    "pyarrow>=10.0.0; python_version<'3.14'",
-    "pyarrow>=22.0.0; python_version>='3.14'",
+    "pyarrow>=22.0.0",
 ]
 polars = [
     "polars>=1.39.0",
@@ -70,13 +67,9 @@ polars = [
 
 [dependency-groups]
 dev = [
-    "sqlalchemy[asyncio]>=1.0.0",
-    "pandas>=1.3.0; python_version<'3.13'",
-    "pandas>=2.3.0; python_version>='3.13'",
-    "numpy>=1.26.0; python_version<'3.13'",
-    "numpy>=2.3.0; python_version>='3.14'",
-    "pyarrow>=10.0.0; python_version<'3.14'",
-    "pyarrow>=22.0.0; python_version>='3.14'",
+    "sqlalchemy[asyncio]>=2.0.0",
+    "pandas>=3.0.0",
+    "pyarrow>=22.0.0",
     "polars>=1.39.0",
     "Jinja2>=3.1.0",
     "mypy>=0.900",
@@ -94,7 +87,6 @@ dev = [
     "sphinx-design",
     "types-python-dateutil",
     "cfn-lint>=1",
-    "tomli>=2.0.0; python_version<'3.11'",
 ]
 
 [build-system]
@@ -142,7 +134,7 @@ exclude = [
     ".tox",
     "benchmarks",
 ]
-target-version = "py310"
+target-version = "py311"
 
 [tool.ruff.lint]
 # https://docs.astral.sh/ruff/rules/
@@ -208,11 +200,10 @@ exclude = [
 legacy_tox_ini = """
 [tox]
 isolated_build = true
-envlist = py{310,311,312,313,314}-{pyathena,sqla,sqla_async}
+envlist = py{311,312,313,314}-{pyathena,sqla,sqla_async}
 
 [gh-actions]
 python =
-    3.10: py310
     3.11: py311
     3.12: py312
     3.13: py313
@@ -236,6 +227,7 @@ commands =
     sqla_async: just test sqla-async
 passenv =
     TOXENV
+    PYTEST_ADDOPTS
     AWS_*
     GITHUB_*
 """

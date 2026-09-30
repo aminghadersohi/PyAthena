@@ -91,6 +91,5 @@ unheaded-files = [
     "tests/pyathena/test_cursor.py",
     "tests/pyathena/test_model.py",
     "tests/pyathena/test_util.py",
-    "tests/resources/queries/create_table.sql.jinja2",
     "tests/sqlalchemy/test_suite.py",
 ]

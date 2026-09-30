@@ -55,7 +55,7 @@ based on actual testing with Athena:
 | `Cursor` (default) | Athena API | `''` | `None` | ✅ Yes |
 | `DictCursor` | Athena API | `''` | `None` | ✅ Yes |
 | `PandasCursor` | CSV file | `NaN` | `NaN` | ❌ No |
-| `PandasCursor` + unload | Parquet file | `''` | `NaN` (pandas 3) or `None` (pandas 2) | ✅ Yes |
+| `PandasCursor` + unload | Parquet file | `''` | `NaN` | ✅ Yes |
 | `ArrowCursor` | CSV file | `''` | `''` | ❌ No |
 | `ArrowCursor` + unload | Parquet file | `''` | `null` | ✅ Yes |
 | `PolarsCursor` | CSV file | `''` | `null` | ✅ Yes |
@@ -177,28 +177,26 @@ df = cursor.execute("""
 print(df)
 #    id  value    description
 # 0   1         empty_string   <- Empty string preserved
-# 1   2    NaN    null_value   <- NULL is NaN (None with pandas 2)
+# 1   2    NaN    null_value   <- NULL is NaN
 # 2   3  hello normal_string
 
 print(df['value'].isna().tolist())
 # [False, True, False]  <- Only NULL is missing, empty string is not
 ```
 
-String columns follow the installed pandas version.
-pandas 3 infers its `str` dtype and represents NULL as `NaN`; pandas 2 uses `object` columns and `None`.
+String columns use the pandas `str` dtype, which represents NULL as `NaN`.
 `fetchone()`, `fetchmany()`, and `fetchall()` return the same values as the DataFrame.
-Use `isna()` or `pandas.isna()` to detect NULL regardless of the pandas version.
+Use `isna()` or `pandas.isna()` to detect NULL.
 
-To get `None` for NULL strings with pandas 3, convert the columns after reading:
+To get `None` for NULL strings, convert the columns after reading:
 
 ```python
 df = cursor.execute("SELECT ...").as_pandas()
 df = df.astype({"value": object}).where(df.notna(), None)
 ```
 
-Alternatively, turn off the pandas 3 string dtype for the whole process before executing queries.
+Alternatively, turn off the pandas `str` dtype for the whole process before executing queries.
 String columns then use `object` with `None` for NULL, including rows returned by `fetchone()`, `fetchmany()`, and `fetchall()`.
-The `future.infer_string` option exists in pandas 2.1 and later.
 
 ```python
 import pandas as pd

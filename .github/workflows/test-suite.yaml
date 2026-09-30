@@ -13,10 +13,22 @@ on:
       test-type:
         required: true
         type: string
+      python-versions:
+        description: JSON array of the Python versions to test
+        required: true
+        type: string
       max-parallel:
         description: Maximum number of Python versions tested concurrently
         type: number
         default: 5
+      skip-spark:
+        description: Skip the Spark tests of the PyAthena suite
+        type: boolean
+        default: false
+      skip-sqla:
+        description: Skip the SQLAlchemy tests of the PyAthena suite
+        type: boolean
+        default: false
 
 jobs:
   run:
@@ -26,6 +38,9 @@ jobs:
 
     env:
       TEST_TYPE: ${{ inputs.test-type }}
+      PYTEST_ADDOPTS: >-
+        ${{ inputs.skip-spark && '--ignore=tests/pyathena/spark --ignore=tests/pyathena/aio/spark' || '' }}
+        ${{ inputs.skip-sqla && '--ignore=tests/pyathena/sqlalchemy --ignore=tests/pyathena/aio/sqlalchemy' || '' }}
       AWS_DEFAULT_REGION: us-west-2
       # Keep SDK retries bounded; PyAthena also retries wrapped catalog errors.
       AWS_RETRY_MODE: standard
@@ -44,7 +59,7 @@ jobs:
       fail-fast: false
       max-parallel: ${{ inputs.max-parallel }}
       matrix:
-        python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
+        python-version: ${{ fromJSON(inputs.python-versions) }}
 
     steps:
       - name: Checkout

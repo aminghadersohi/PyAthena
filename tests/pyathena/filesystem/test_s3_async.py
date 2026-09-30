@@ -4,7 +4,7 @@ import time
 import urllib.parse
 import urllib.request
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from itertools import chain
 from pathlib import Path
 
@@ -371,7 +371,7 @@ class TestAioS3FileSystem:
         with pytest.raises(FileNotFoundError):
             await fs._info(file)
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         await fs._pipe_file(file, b"a")
         bucket, key, version_id = fs.parse_path(file)
         fs.invalidate_cache()
